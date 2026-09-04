@@ -149,7 +149,7 @@
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     ;; sBTC in, both shares out. Vault always equals complete sets outstanding.
-    (try! (contract-call? 'SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token
+    (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
                           transfer sats tx-sender current-contract none))
     (map-set positions { id: id, who: tx-sender }
              { idle: (+ (get idle pos) sats), bonded: (+ (get bonded pos) sats) })
@@ -175,8 +175,8 @@
     ;; Clarity 4+: the contract may move exactly `sats` of sBTC and nothing else.
     ;; If the callee tries to move more, the whole thing rolls back.
     (as-contract?
-      ((with-ft 'SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token "sbtc-token" sats))
-      (try! (contract-call? 'SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token
+      ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sats))
+      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
                             transfer sats current-contract who none)))))
 
 ;; ---------------------------------------------------------- market: create
@@ -256,7 +256,7 @@
                             (get script out) (get value out) witness-script
                             staker commitment-offset (get threshold-sats m)))
       ;; 5. and pox-5 agrees this staker holds a live bond
-      (let ((mem (unwrap! (contract-call? 'ST000000000000000000002AMW42H.pox-5
+      (let ((mem (unwrap! (contract-call? 'SP000000000000000000002Q6VF78.pox-5
                                           get-bond-membership staker)
                           ERR_NO_MEMBERSHIP)))
         ;; 6. native L1, not the bridged sBTC path
@@ -321,7 +321,7 @@
                           idle-circ:   (- (get idle-circ m) (get idle pos)),
                           bonded-circ: (- (get bonded-circ m) (get bonded pos)) }))
       (try! (as-contract?
-              ((with-ft 'SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token "sbtc-token" payout))
-              (try! (contract-call? 'SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token
+              ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" payout))
+              (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
                                     transfer payout current-contract who none))))
       (ok payout))))

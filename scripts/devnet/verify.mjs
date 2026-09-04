@@ -20,6 +20,8 @@ const API  = process.env.STACKS_API  ?? "http://127.0.0.1:3999";
 const ADDR = process.env.CONTRACT_ADDRESS ?? "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM";
 const KEY  = process.env.DEPLOYER_KEY
   ?? "753b7cc01a1a2e86221266a154af739463fce51219d97e4f856cd7200c3bd2a601";
+const CONTRACT = process.env.CONTRACT_NAME ?? "at-stake";
+const SBTC = process.env.SBTC_NAME ?? "sbtc-token";
 const NETWORK = { ...STACKS_DEVNET, client: { baseUrl: NODE } };
 const hex = (h) => Buffer.from(String(h).replace(/^0x/, ""), "hex");
 
@@ -32,7 +34,7 @@ const head = (t) => console.log(`\n${t}`);
 const info = () => fetch(`${NODE}/v2/info`).then((r) => r.json());
 
 async function readOnly(fn, args) {
-  const r = await fetch(`${NODE}/v2/contracts/call-read/${ADDR}/at-stake/${fn}`, {
+  const r = await fetch(`${NODE}/v2/contracts/call-read/${ADDR}/${CONTRACT}/${fn}`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ sender: ADDR, arguments: args.map((a) => serializeCV(a)) }),
   }).then((r) => r.json());
@@ -62,7 +64,7 @@ async function call(functionName, functionArgs, fee = 10000n) {
     nonce = BigInt(a.nonce);
   }
   const tx = await makeContractCall({
-    contractAddress: ADDR, contractName: "at-stake", functionName, functionArgs,
+    contractAddress: ADDR, contractName: CONTRACT, functionName, functionArgs,
     senderKey: KEY, network: NETWORK, postConditionMode: PostConditionMode.Allow,
     fee, nonce: nonce++,
   });
@@ -95,7 +97,7 @@ async function main() {
     const r = await fetch(`${NODE}/v2/contracts/interface/${ADDR}/${c}`);
     check(r.ok, `${c} deployed`);
   }
-  const src = await fetch(`${NODE}/v2/contracts/source/${ADDR}/at-stake`).then((r) => r.json());
+  const src = await fetch(`${NODE}/v2/contracts/source/${ADDR}/${CONTRACT}`).then((r) => r.json());
   check(!src.source.includes("SIM-SKIP-HEADER"), "deployed at-stake has the REAL burn-header check");
   check(src.source.includes("pox-5"), "deployed at-stake calls pox-5");
 
@@ -162,7 +164,7 @@ async function main() {
   // ---------------------------------------------------------------- money
   head("sBTC");
   const sbtcBal = async (who) => {
-    const r = await fetch(`${NODE}/v2/contracts/call-read/${ADDR}/sbtc-token/get-balance`, {
+    const r = await fetch(`${NODE}/v2/contracts/call-read/${ADDR}/${SBTC}/get-balance`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ sender: ADDR, arguments: [serializeCV(Cl.principal(who))] }),
     }).then((r) => r.json());

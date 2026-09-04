@@ -22,6 +22,8 @@ const NODE = process.env.STACKS_NODE ?? "http://127.0.0.1:20443";
 // STACKS_DEVNET carries the chain id, transaction version and address
 // versions; only the endpoint needs overriding (its default is the API on
 // 3999, which we do not run).
+const CONTRACT = process.env.CONTRACT_NAME ?? "at-stake";
+const SBTC = process.env.SBTC_NAME ?? "sbtc-token";
 const NETWORK = { ...STACKS_DEVNET, client: { baseUrl: NODE } };
 // Stock Clarinet devnet deployer (ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM).
 const DEPLOYER_KEY = process.env.DEPLOYER_KEY
@@ -92,7 +94,7 @@ async function main() {
 
   const tx = await makeContractCall({
     contractAddress: CONTRACT_ADDRESS,
-    contractName: "at-stake",
+    contractName: CONTRACT,
     functionName: "create-market",
     functionArgs: [
       Cl.buffer(marketId),
