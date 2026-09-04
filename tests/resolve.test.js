@@ -184,10 +184,10 @@ describe("create-market: proving the snapshot on chain", () => {
     expect(Number(m["bond-index"].value)).toBe(BOND_INDEX);
   });
 
-  it("REJECTS a wallet under 1 BTC -- the cutoff is in the contract", () => {
+  it("REJECTS a zero-value snapshot output", () => {
     const small = ser({
       inputs: [{ txid: SNAP_PREV, vout: 0, script: Buffer.alloc(0) }],
-      outputs: [{ value: 99_999_999, script: WALLET_SPK }],
+      outputs: [{ value: 0, script: WALLET_SPK }],
     });
     const b = inBlock(small);
     const r = simnet.callPublicFn(C, "create-market", [

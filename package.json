@@ -16,12 +16,13 @@
   "license": "ISC",
   "devDependencies": {
     "@stacks/clarinet-sdk": "^3.23.2",
+    "@stacks/network": "^7.6.0",
     "@stacks/transactions": "^7.6.0",
+    "@stacks/wallet-sdk": "^7.6.0",
     "@types/node": "^26.4.1",
     "chokidar-cli": "^3.0.0",
     "vitest": "^4.1.11",
-    "vitest-environment-clarinet": "^3.0.2",
-    "@stacks/network": "^7.6.0"
+    "vitest-environment-clarinet": "^3.0.2"
   },
   "engines": {
     "npm": ">=11"

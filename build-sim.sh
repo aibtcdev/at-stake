@@ -19,7 +19,7 @@
 # contracts/at-stake-sim.clar is generated. Never edit it, never deploy it.
 set -e
 sed -e "s|'SP000000000000000000002Q6VF78.pox-5|'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.pox5-sim|g" \
-    -e "s|(asserts! (is-eq our-hash chain-hash) ERR_BAD_HEADER)|(asserts! (or SIM-SKIP-HEADER (is-eq our-hash chain-hash)) ERR_BAD_HEADER)|" \
+    -e "s|(asserts! (is-eq (reverse-buff32 our-hash) chain-hash) ERR_BAD_HEADER)|(asserts! (or SIM-SKIP-HEADER (is-eq (reverse-buff32 our-hash) chain-hash)) ERR_BAD_HEADER)|" \
     -e "s|^(define-constant MIN_SNAPSHOT_SATS|(define-constant SIM-SKIP-HEADER true) ;; SIMNET ONLY\n(define-constant MIN_SNAPSHOT_SATS|" \
   contracts/at-stake.clar > contracts/at-stake-sim.clar
 cat >> contracts/at-stake-sim.clar <<'SIM'

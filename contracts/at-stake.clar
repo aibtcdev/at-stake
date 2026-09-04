@@ -1,6 +1,7 @@
 ;; At Stake: did these coins enter a Stacks protocol bond before burn height H?
 
-(define-constant MIN_SNAPSHOT_SATS u100000000) ;; 1 BTC
+;; Any real UTXO qualifies; only a zero-value output is rejected.
+(define-constant MIN_SNAPSHOT_SATS u1)
 
 (define-constant STATUS_OPEN   u0)
 (define-constant STATUS_BONDED u1) ;; YES
@@ -54,6 +55,17 @@
   { id: (buff 32), who: principal }
   { idle: uint, bonded: uint })
 
+;; Bitcoin block hashes are reported reversed; merkle math is internal order.
+(define-private (reverse-buff16 (input (buff 16)))
+  (unwrap-panic (slice? (unwrap-panic (to-consensus-buff? (buff-to-uint-le input))) u1 u17)))
+
+(define-read-only (reverse-buff32 (input (buff 32)))
+  (unwrap-panic (as-max-len?
+    (concat
+      (reverse-buff16 (unwrap-panic (as-max-len? (unwrap-panic (slice? input u16 u32)) u16)))
+      (reverse-buff16 (unwrap-panic (as-max-len? (unwrap-panic (slice? input u0 u16)) u16))))
+    u32)))
+
 ;; Bitcoin hashes twice.
 (define-read-only (sha256d (data (buff 4096)))
   (sha256 (sha256 data)))
@@ -96,7 +108,7 @@
         (our-hash   (sha256d (unwrap-panic (as-max-len? header u4096))))
         (root       (unwrap! (header-merkle-root header) ERR_BAD_HEADER)))
     ;; Anyone can hand us 80 bytes, so prove they hash to what the chain agreed.
-    (asserts! (is-eq our-hash chain-hash) ERR_BAD_HEADER)
+    (asserts! (is-eq (reverse-buff32 our-hash) chain-hash) ERR_BAD_HEADER)
     (asserts! (is-eq (merkle-root-from-proof txid tx-index path) root) ERR_BAD_MERKLE)
     (ok true)))
 
