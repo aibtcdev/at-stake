@@ -1,21 +1,10 @@
-;; Bitcoin transaction parsing in Clarity.
-;;
-;; IMPORTANT: pass the NON-WITNESS (legacy) serialization. That is what the
-;; txid is computed over, so it is what has to match the merkle proof. A
-;; segwit tx serialized with marker+flag hashes to the wtxid instead and will
-;; not match.
-;;
-;; Clarity has no loops, so every scan is a `fold` over a fixed index list
-;; carrying a cursor in the accumulator. Entries past the real count are
-;; ignored via a `done` flag rather than an early exit.
+;; Bitcoin transaction parsing. Pass the NON-WITNESS serialization.
 
 (define-constant ERR_PARSE      (err u300))
 (define-constant ERR_OUT_RANGE  (err u301))
 (define-constant ERR_TOO_MANY   (err u302))
 
 (define-constant IDX (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9))
-
-;; ------------------------------------------------------------------ scalars
 
 (define-read-only (read-u8 (tx (buff 4096)) (pos uint))
   (match (element-at? tx pos)
@@ -51,10 +40,7 @@
                     none))))
     none))
 
-;; -------------------------------------------------------------------- inputs
-
-;; An input is: 32-byte txid, 4-byte vout, varint script length, script,
-;; 4-byte sequence. We keep the outpoint and skip the script.
+;; Input layout: txid(32) vout(4) varint scriptlen, script, sequence(4).
 (define-private (skip-input
                   (i uint)
                   (acc { tx: (buff 4096), pos: uint, n: uint, ok: bool,
@@ -79,8 +65,7 @@
               (merge acc { ok: false }))
           (merge acc { ok: false })))))
 
-;; Does this transaction spend the given outpoint? This is the check pox-5
-;; does NOT do, and the only reason a market can be about a Bitcoin address.
+;; Does this tx spend the given outpoint? pox-5 does not check this.
 (define-read-only (tx-spends-outpoint
                     (tx (buff 4096))
                     (prev-txid (buff 32))
@@ -96,9 +81,7 @@
             (if (get ok r) (ok (> (get hits r) u0)) ERR_PARSE)))
     ERR_PARSE))
 
-;; ------------------------------------------------------------------- outputs
-
-;; Walk inputs without matching, just to find where the output section starts.
+;; Skip the inputs to find where the outputs start.
 (define-private (advance-input
                   (i uint)
                   (acc { tx: (buff 4096), pos: uint, n: uint, ok: bool }))
@@ -159,16 +142,11 @@
                   ERR_PARSE))))
     ERR_PARSE))
 
-;; The txid is the double-sha of the legacy serialization, byte-reversed for
-;; display. We keep internal order, which is what merkle proofs use.
+;; Internal (unreversed) txid, which is what merkle proofs use.
 (define-read-only (tx-id (tx (buff 4096)))
   (sha256 (sha256 tx)))
 
-;; ------------------------------------------------------- pox-5 lockup output
-
-;; The two legs of a bond are tied together by the Bitcoin script committing to
-;; a hash of the staker's Stacks principal. This is the whole binding between
-;; "some BTC got timelocked" and "this specific Stacks account did it".
+;; Binds a timelocked BTC output to one Stacks principal.
 (define-read-only (staker-commitment (staker principal))
   (match (to-consensus-buff? staker)
     b (some (sha256 (sha256 b)))
@@ -182,19 +160,7 @@
 (define-read-only (is-p2wsh-for (spk (buff 128)) (witness-script (buff 512)))
   (is-eq spk (p2wsh-script-pubkey witness-script)))
 
-;; Does the witness script embed the staker commitment at the stated offset?
-;; The early-exit branch of the pox-5 lockup reveals the 32-byte
-;; sha256(to-consensus-buff? staker) preimage, so the commitment sits verbatim
-;; in the script bytes.
-;;
-;; The caller supplies the offset rather than us searching for it. Clarity has
-;; no substring search, and searching would be pointless anyway: a wrong offset
-;; simply fails the equality. The submitter cannot lie their way past this.
-;;
-;; NOTE: this proves the script is BOUND to that staker. It does not prove the
-;; script follows pox-5's exact template. Pin the template from
-;; pox-5.clar construct-lockup-script before mainnet. In v1 the weight is
-;; carried by P2WSH hash equality plus the pox-5 membership cross-call.
+;; Is the staker commitment at `offset` in the witness script?
 (define-read-only (script-commits-to-staker
                     (witness-script (buff 512))
                     (staker principal)
@@ -205,8 +171,7 @@
         false)
     false))
 
-;; Full lockup check: the output really is a P2WSH paying the given witness
-;; script, the script is bound to the staker, and the amount clears the bar.
+;; P2WSH match, staker binding, and amount above the bar.
 (define-read-only (verify-lockup-output
                     (spk (buff 128))
                     (value uint)
@@ -221,7 +186,7 @@
             c (ok { bound: true, commitment: c, value: value })
             (err u312)))))
 
-;; Everything the Bitcoin side has to say, in one call.
+;; The whole Bitcoin-side check in one call.
 (define-read-only (verify-lockup
                     (spk (buff 128))
                     (value uint)

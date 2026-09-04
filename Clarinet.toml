@@ -42,18 +42,8 @@ epoch = "4.0"
 
 # The real deployable contract. Listed so it is actually type-checked against
 # its live testnet dependencies -- previously only the generated sim build was.
-[contracts.devnet-sbtc]
-path = "contracts/devnet-sbtc.clar"
-clarity_version = 6
-epoch = "4.0"
-
 [contracts.at-stake]
 path = "contracts/at-stake.clar"
-clarity_version = 6
-epoch = "4.0"
-
-[contracts.at-stake-devnet]
-path = "contracts/at-stake-devnet.clar"
 clarity_version = 6
 epoch = "4.0"
 

@@ -11,11 +11,7 @@
     "test": "vitest run",
     "test:costs": "npm run build:sim && vitest run -- --costs",
     "test:report": "npm run build:sim && vitest run -- --coverage --costs",
-    "test:watch": "chokidar \"tests/**/*.js\" \"contracts/**/*.clar\" -c \"npm run test:report\"",
-    "build:pox5": "bash ./build-pox5-sim.sh",
-    "devnet:check": "node scripts/devnet/check.mjs",
-    "devnet:verify": "node scripts/devnet/verify.mjs",
-    "devnet:start": "node scripts/devnet/fix-plan.mjs && clarinet devnet start --no-dashboard --use-on-disk-deployment-plan"
+    "test:watch": "chokidar \"tests/**/*.js\" \"contracts/**/*.clar\" -c \"npm run test:report\""
   },
   "license": "ISC",
   "devDependencies": {
