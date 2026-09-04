@@ -1,0 +1,29 @@
+{
+  "name": "at-stake",
+  "version": "0.1.0",
+  "description": "A prediction market on one bit: did these Bitcoin coins enter a Stacks protocol bond before burn height H?",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build:sim": "bash ./build-pox5-sim.sh && bash ./build-sim.sh",
+    "check": "npm run build:sim && clarinet check",
+    "pretest": "npm run build:sim",
+    "test": "vitest run",
+    "test:costs": "npm run build:sim && vitest run -- --costs",
+    "test:report": "npm run build:sim && vitest run -- --coverage --costs",
+    "test:watch": "chokidar \"tests/**/*.js\" \"contracts/**/*.clar\" -c \"npm run test:report\"",
+    "build:pox5": "bash ./build-pox5-sim.sh"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "@stacks/clarinet-sdk": "^3.23.2",
+    "@stacks/transactions": "^7.6.0",
+    "@types/node": "^26.4.1",
+    "chokidar-cli": "^3.0.0",
+    "vitest": "^4.1.11",
+    "vitest-environment-clarinet": "^3.0.2"
+  },
+  "engines": {
+    "npm": ">=11"
+  }
+}
