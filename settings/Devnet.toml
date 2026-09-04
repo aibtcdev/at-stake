@@ -160,3 +160,50 @@ wallet = "wallet_3"
 slots = 2
 btc_address = "mvZtbibDAAA3WLpY7zXXFqRa3T4XSknBX7"
 
+# Epoch 4.0 activates at burn 162, part-way through reward cycle 3, and pox-5
+# takes over from pox-4 at that point. The orders above stacked under pox-4 and
+# do NOT carry across, so without these the first full pox-5 cycle (4) has zero
+# stackers -- no reward set, no PoX anchor block, and the signer stalls the
+# chain with "PoXAnchorBlockRequired" while the miner aborts.
+#
+# These stack under pox-5 for cycle 4 onwards.
+
+[[devnet.pox_stacking_orders]]
+start_at_cycle = 4
+duration = 12
+auto_extend = true
+wallet = "wallet_1"
+slots = 2
+btc_address = "mr1iPkD9N3RJZZxXRk7xF9d36gffa6exNC"
+
+[[devnet.pox_stacking_orders]]
+start_at_cycle = 4
+duration = 12
+auto_extend = true
+wallet = "wallet_2"
+slots = 2
+btc_address = "muYdXKmX9bByAueDe6KFfHd5Ff1gdN9ErG"
+
+[[devnet.pox_stacking_orders]]
+start_at_cycle = 4
+duration = 12
+auto_extend = true
+wallet = "wallet_3"
+slots = 2
+btc_address = "mvZtbibDAAA3WLpY7zXXFqRa3T4XSknBX7"
+
+[[devnet.pox_stacking_orders]]
+start_at_cycle = 4
+duration = 12
+auto_extend = true
+wallet = "wallet_4"
+slots = 2
+btc_address = "mg1C76bNTutiCDV3t9nWhZs3Dc8LzUufj8"
+
+[[devnet.pox_stacking_orders]]
+start_at_cycle = 4
+duration = 12
+auto_extend = true
+wallet = "wallet_5"
+slots = 2
+btc_address = "mweN5WVqadScHdA81aATSdcVr4B6dNokqx"
