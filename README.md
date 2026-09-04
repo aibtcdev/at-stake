@@ -206,3 +206,32 @@ with the `sbtc_balance` from `settings/Devnet.toml` (10 sBTC each).
    unlock cycle is reached, and a rollover overwrites `bondIndex`. Set
    `close-height` to the bond start, not the registration cutoff, so the
    100-block prepare phase acts as a grace window.
+
+## Proven on mainnet
+
+The full lifecycle has run end to end on Bitcoin mainnet against
+`SP5Y3W3F78NKFH4HYFNDQMJC484VZWKDH35ZR2M9.at-stake-v2`:
+
+| step | result |
+|---|---|
+| `create-market` | `(ok 0xfab06a53…)` snapshot proven at Bitcoin block 965,335 |
+| `mint-complete-set` | `(ok u400)` |
+| `resolve-bonded` | `(ok u1)` all six checks against real evidence |
+| `redeem` | `(ok u400)` vault drained to zero |
+
+The YES outcome was not arranged. A third party locked 5 BTC into pox-5 bond 1;
+the market was built around their coins without their involvement, and the
+contract verified it independently from a real block header, a 12-deep merkle
+proof, and pox-5's own membership record.
+
+### The bug mainnet caught
+
+The first mainnet `create-market` aborted with `ERR_BAD_HEADER`.
+`get-burn-block-info?` returns the burn block hash in display order while
+`sha256d(header)` is internal order, so the comparison could never succeed on a
+real Bitcoin block -- the contract was inert. pox-5 does the same reversal in
+its own `verify-block-header`.
+
+All 58 simnet tests passed throughout, because `SIM-SKIP-HEADER` bypasses
+exactly that assert. Header binding was listed as an untested gap; it was
+untested *and* wrong. Cost to find: one transaction.
