@@ -107,10 +107,12 @@ bitcoin_node_p2p_port = 18444
 bitcoin_node_username = "devnet"
 bitcoin_node_password = "devnet"
 
-# How fast the burn chain advances. Lower it to shorten test cycles: markets
-# are measured in burn heights, so block time is the clock the whole protocol
-# runs on. 10s keeps a full create -> lockup -> resolve loop to a few minutes.
-bitcoin_controller_block_time = 10_000
+# How fast the burn chain advances. Markets are measured in burn heights, so
+# this is the clock the whole protocol runs on, and it is tempting to lower it.
+# Do not go below the 30s default: Nakamoto block production needs time for a
+# signer round, and at 10s the signer falls behind and stalls the chain with
+# "Last accepted block has timed out".
+bitcoin_controller_block_time = 30_000
 
 stacks_node_rpc_port = 20443
 
