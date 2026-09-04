@@ -159,6 +159,90 @@ async function main() {
   check(bh.tx_status !== "success", "tampered block header REJECTED  <-- only testable here",
         bh.tx_result?.repr ?? bh.tx_status);
 
+  // ---------------------------------------------------------------- money
+  head("sBTC");
+  const sbtcBal = async (who) => {
+    const r = await fetch(`${NODE}/v2/contracts/call-read/${ADDR}/sbtc-token/get-balance`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sender: ADDR, arguments: [serializeCV(Cl.principal(who))] }),
+    }).then((r) => r.json());
+    if (!r.okay) return null;
+    return Number(cvToJSON(hexToCV(r.result)).value.value);
+  };
+  const bal0 = await sbtcBal(ADDR);
+  if (bal0 === null || bal0 === 0) {
+    bad("deployer holds sBTC", "0 — cannot exercise the money layer on devnet");
+    console.log("\n  The escrow/trading half needs sBTC in a devnet wallet. It is fully");
+    console.log("  covered by the simnet suite (npm test) against the same contract.");
+  } else {
+    ok("deployer holds sBTC", `${bal0} sats`);
+
+    head("mint-complete-set  (1 sat -> 1 IDLE + 1 BONDED)");
+    const STAKE = 1_000_000;
+    const mintTx = await call("mint-complete-set", [Cl.buffer(id), Cl.uint(STAKE)]);
+    const mr = await settled(mintTx);
+    check(mr.tx_status === "success", "mint succeeded", mr.tx_result?.repr ?? mr.tx_status);
+    let mk = (await readOnly("get-market", [Cl.buffer(id)])).value?.value;
+    check(Number(mk.vault.value) === STAKE, "vault holds the stake", `${mk.vault.value}`);
+    check(Number(mk["idle-circ"].value) === STAKE && Number(mk["bonded-circ"].value) === STAKE,
+          "both sides issued equally", `idle ${mk["idle-circ"].value}, bonded ${mk["bonded-circ"].value}`);
+    check(bal0 - (await sbtcBal(ADDR)) === STAKE, "sBTC actually left the wallet");
+
+    const pos = (await readOnly("get-position", [Cl.buffer(id), Cl.principal(ADDR)])).value;
+    check(Number(pos.idle.value) === STAKE && Number(pos.bonded.value) === STAKE, "position credited both sides");
+
+    head("transfer-shares  (sell the side you do not believe)");
+    const OTHER = "ST1SJ3DTE5DN7X54YDH5D64R3BCB6A2AG2ZQ8YPD5";
+    const xTx = await call("transfer-shares", [Cl.buffer(id), Cl.uint(0), Cl.uint(400_000), Cl.principal(OTHER)]);
+    const xr = await settled(xTx);
+    check(xr.tx_status === "success", "transfer succeeded", xr.tx_result?.repr ?? xr.tx_status);
+    const mine_ = (await readOnly("get-position", [Cl.buffer(id), Cl.principal(ADDR)])).value;
+    const theirs = (await readOnly("get-position", [Cl.buffer(id), Cl.principal(OTHER)])).value;
+    check(Number(mine_.idle.value) === 600_000, "seller's IDLE reduced");
+    check(Number(theirs.idle.value) === 400_000, "buyer's IDLE credited");
+    mk = (await readOnly("get-market", [Cl.buffer(id)])).value?.value;
+    check(Number(mk["idle-circ"].value) === STAKE, "a transfer does not change supply");
+    check(Number(mk.vault.value) === STAKE, "vault untouched by a transfer");
+
+    head("merge-complete-set  (pair back into sBTC)");
+    const before = await sbtcBal(ADDR);
+    const mgTx = await call("merge-complete-set", [Cl.buffer(id), Cl.uint(200_000)]);
+    const mg = await settled(mgTx);
+    check(mg.tx_status === "success", "merge succeeded", mg.tx_result?.repr ?? mg.tx_status);
+    check((await sbtcBal(ADDR)) - before === 200_000, "sBTC returned 1:1");
+
+    // ------------------------------------------------------- settlement
+    head("resolve-idle + redeem  (the NO path, permissionless)");
+    const short = randomBytes(32);
+    const nowB = (await info()).burn_block_height;
+    const cm2 = await settled(await call("create-market", [
+      Cl.buffer(short), Cl.buffer(hex(vout.scriptPubKey.hex)), Cl.uint(1),
+      Cl.uint(nowB + 3), Cl.uint(100_000_000),
+      Cl.buffer(hex(proof.txHex)), Cl.uint(vout.n), Cl.uint(proof.burnHeight),
+      Cl.buffer(hex(proof.headerHex)), Cl.uint(proof.txIndex),
+      Cl.list(proof.path.map((s) => Cl.buffer(s))),
+    ]));
+    check(cm2.tx_status === "success", "second market created (closes in 3 blocks)");
+    await settled(await call("mint-complete-set", [Cl.buffer(short), Cl.uint(500_000)]));
+
+    console.log("  (mining past the close height)");
+    await mineGently(5, await getNewAddress("mining"));
+
+    const riTx = await call("resolve-idle", [Cl.buffer(short)]);
+    const ri = await settled(riTx);
+    check(ri.tx_status === "success", "resolve-idle succeeded once the window closed", ri.tx_result?.repr ?? ri.tx_status);
+    const m2 = (await readOnly("get-market", [Cl.buffer(short)])).value?.value;
+    check(Number(m2.status.value) === 2, "status is IDLE (NO)", `status ${m2.status.value}`);
+
+    const beforeRedeem = await sbtcBal(ADDR);
+    const rdTx = await call("redeem", [Cl.buffer(short)]);
+    const rd = await settled(rdTx);
+    check(rd.tx_status === "success", "redeem succeeded", rd.tx_result?.repr ?? rd.tx_status);
+    check((await sbtcBal(ADDR)) - beforeRedeem === 500_000, "winning side paid out 1:1", "IDLE won");
+    const m3 = (await readOnly("get-market", [Cl.buffer(short)])).value?.value;
+    check(Number(m3.vault.value) === 0, "vault drained to zero — contract stays solvent");
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 }
