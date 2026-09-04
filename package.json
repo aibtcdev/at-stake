@@ -12,7 +12,8 @@
     "test:costs": "npm run build:sim && vitest run -- --costs",
     "test:report": "npm run build:sim && vitest run -- --coverage --costs",
     "test:watch": "chokidar \"tests/**/*.js\" \"contracts/**/*.clar\" -c \"npm run test:report\"",
-    "build:pox5": "bash ./build-pox5-sim.sh"
+    "build:pox5": "bash ./build-pox5-sim.sh",
+    "devnet:check": "node scripts/devnet/check.mjs"
   },
   "license": "ISC",
   "devDependencies": {
