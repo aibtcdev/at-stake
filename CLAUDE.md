@@ -29,7 +29,8 @@ substitutions, and all three exist because simnet cannot do the real thing:
 
 1. sBTC `SN3VMHXEN...` -> `SM3VDXK3...`. Same sBTC, mainnet address. Clarinet
    hardcodes that id as the one it auto-funds, so it is the only one that works.
-2. pox-5 `ST000000000000000000002AMW42H.pox-5` -> `mock-pox5`. See below.
+2. pox-5 `ST000000000000000000002AMW42H.pox-5` -> `pox5-sim`, the same
+   contract under our address so tests hold bond-admin. Not a mock.
 3. `SIM-SKIP-HEADER`, bypassing the burn-header equality check.
 
 It then appends `test-` seeders. `npm test` runs the build first. If you edit
@@ -72,13 +73,12 @@ It then appends `test-` seeders. `npm test` runs the build first. If you edit
 |---|---|---|
 | `at-stake.clar` | market, escrow, both resolvers | yes |
 | `btc-parse.clar` | Bitcoin tx parsing, P2WSH lockup checks | yes |
-| `mock-pox5.clar` | `get-bond-membership` stand-in | no, simnet only |
 | `pox5-sim.clar` | the REAL pox-5, ours so we hold bond-admin | no, simnet only |
 | `test-signer-manager.clar` | `signer-manager-trait` impl | no, simnet only |
 
 Real pox-5 IS drivable in simnet: see `build-pox5-sim.sh`. grant-signer-key ->
 register-signer -> setup-bond -> register-for-bond writes a genuine membership
-row. `resolve.test.js` has not been migrated onto it yet; that is next.
+row, and `resolve.test.js` uses exactly that.
 
 What the deployed contract calls, and nothing else:
 
@@ -89,7 +89,11 @@ What the deployed contract calls, and nothing else:
 
 `btc-parse.clar` has no external dependencies at all.
 
-### Why `mock-pox5` is still here
+### No mocks
+
+`resolve.test.js` drives real pox-5: grant-signer-key -> register-signer ->
+setup-bond -> register-for-bond. The only reason `pox5-sim` is generated rather
+than used as-is is the burn-header assert.
 
 The only writer of `protocol-bond-memberships` in real pox-5 is
 `register-for-bond`, which runs `verify-l1-lockups` -> `verify-block-header`:
@@ -103,9 +107,8 @@ The only writer of `protocol-bond-memberships` in real pox-5 is
 Same check as `tx-was-mined`, same simnet failure: synthetic burn blocks that
 no real Bitcoin header hashes to. Registration is also allowlist-gated by the
 bond admin and moves real sBTC via `roll-sbtc`. So real pox-5 returns `none`
-forever in simnet, which tests one rejection path and leaves the YES path and
-four other rejections untested. The mock covers that one read-only for 11 tests.
-**It is swapped in by `build-sim.sh` only. Never let it reach `at-stake.clar`.**
+forever unless that one assert is bypassed. `build-pox5-sim.sh` bypasses it and
+nothing else. **Never let `pox5-sim` reach `at-stake.clar`.**
 
 Clarity has no loops. All Bitcoin scanning is `fold` over a fixed index list
 with a cursor in the accumulator, and a `done` flag instead of early exit.

@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { Cl } from "@stacks/transactions";
 import { createHash } from "node:crypto";
+import {
+  registerSigner, setupBond, currentBondIndex, minUnlockHeight,
+  lockupScriptFor, registerL1Bond, registerSbtcBond,
+} from "./helpers/pox5.js";
 
 const deployer = simnet.getAccounts().get("deployer");
 const alice = simnet.getAccounts().get("wallet_1");
@@ -61,14 +65,17 @@ function inBlock(txBuf) {
   return { txid, index: 2, path: proofFor(levels, 2), header };
 }
 
-// --- the pox-5 lockup witness script, with the staker commitment inside it ---
-// The commitment is sha256d(to-consensus-buff?(staker principal)). Its byte
-// offset inside the script is passed to the contract so the check is exact.
-function lockupScript(stakerCommitment) {
-  const prefix = Buffer.from("63" + "04" + "00000000" + "b1" + "75" + "67" + "a8" + "20", "hex");
-  const suffix = Buffer.from("88" + "21" + "02".repeat(33) + "ac" + "68" + "69", "hex");
-  return { script: Buffer.concat([prefix, stakerCommitment, suffix]), offset: prefix.length };
+// A block containing exactly one transaction. Its merkle root is the txid, so
+// the proof is the empty path -- which both pox-5 and at-stake accept as valid.
+// The lockup uses this so that ONE transaction satisfies pox-5's lockup
+// verification and at-stake's snapshot-spend check at the same time.
+function inSoloBlock(txBuf) {
+  const txid = sha256d(txBuf);
+  const header = Buffer.alloc(80, 0xab);
+  txid.copy(header, 36);
+  return { txid, index: 0, path: [], header };
 }
+
 
 function stakerCommitment(principalStr) {
   const r = simnet.callReadOnlyFn("btc-parse", "staker-commitment", [Cl.principal(principalStr)], deployer);
@@ -77,7 +84,9 @@ function stakerCommitment(principalStr) {
 
 const WALLET_SPK = p2wpkh(Buffer.alloc(20, 0x42)); // the subject wallet
 const SNAP_PREV = sha256d(Buffer.from("older utxo"));
-const BOND_INDEX = 7;
+// pox-5 only accepts setup-bond for the single index whose start lies in the
+// next two reward cycles. At simnet's starting burn height that is index 1.
+const BOND_INDEX = 1;
 const THRESHOLD = 100_000_000; // 1 BTC
 // The official sBTC token, present in simnet because Clarinet.toml names
 // `sbtc-deposit` in [[project.requirements]] -- that is what preloads every
@@ -95,27 +104,39 @@ const snapTx = ser({
 });
 const SNAP_TXID = sha256d(snapTx);
 
-function createMarket(id, closeHeight = 500, threshold = THRESHOLD) {
+function createMarket(id, closeHeight = 500, threshold = THRESHOLD, bondIndex = BOND_INDEX) {
   const b = inBlock(snapTx);
   return simnet.callPublicFn(C, "create-market", [
-    Cl.buffer(id), Cl.buffer(WALLET_SPK), Cl.uint(BOND_INDEX), Cl.uint(closeHeight),
+    Cl.buffer(id), Cl.buffer(WALLET_SPK), Cl.uint(bondIndex), Cl.uint(closeHeight),
     Cl.uint(threshold), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
     Cl.buffer(b.header), Cl.uint(b.index), Cl.list(b.path.map((x) => Cl.buffer(x))),
   ], alice);
 }
 
-// The lockup: spends the snapshot outpoint, pays a P2WSH bound to the staker.
-function buildLockup(sats = SNAP_SATS) {
-  const c = stakerCommitment(staker);
-  const { script, offset } = lockupScript(c);
+// Set up a real bond in pox-5 and remember the unlock height its lockup script
+// is bound to. Everything downstream uses pox-5's own template.
+let UNLOCK = 0;
+function bondSetup() {
+  const idx = currentBondIndex();
+  registerSigner(deployer);
+  setupBond(deployer, idx, [staker, alice, bob]);
+  UNLOCK = minUnlockHeight(deployer, idx) + 10;
+  return idx;
+}
+
+// The lockup: spends the snapshot outpoint and pays pox-5's REAL lockup P2WSH.
+// One transaction, verified independently by both contracts -- pox-5 accepts it
+// as a timelock, at-stake sees it spend the committed coins.
+function buildLockup(sats = SNAP_SATS, stakerPrincipal = staker, prevTxid = SNAP_TXID) {
+  const { witness, spk, offset } = lockupScriptFor(deployer, stakerPrincipal, UNLOCK);
   const tx = ser({
-    inputs: [{ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) }],
+    inputs: [{ txid: prevTxid, vout: 0, script: Buffer.alloc(0) }],
     outputs: [
-      { value: sats, script: p2wsh(script) },
+      { value: sats, script: spk },
       { value: 12_000, script: p2wpkh(Buffer.alloc(20, 7)) },
     ],
   });
-  return { tx, script, offset, block: inBlock(tx) };
+  return { tx, script: witness, offset, block: inSoloBlock(tx) };
 }
 
 function resolveBonded(id, lk, who = bob, stakerPrincipal = staker) {
@@ -128,9 +149,23 @@ function resolveBonded(id, lk, who = bob, stakerPrincipal = staker) {
   ], who);
 }
 
-const setBond = (isL1, sats, bondIndex = BOND_INDEX, who = staker) =>
-  simnet.callPublicFn("mock-pox5", "set-membership",
-    [Cl.principal(who), Cl.uint(bondIndex), Cl.bool(isL1), Cl.uint(sats)], deployer);
+// Establishes REAL pox-5 bond state -- no mock. Returns the lockup that pox-5
+// accepted, so the same transaction can be handed to resolve-bonded.
+//
+// isL1 false takes pox-5's sBTC-locked branch, which really moves sBTC out of
+// the staker, so the amount there is capped by the wallet's balance. The L1
+// branch only needs the amount to appear in the Bitcoin output.
+function setBond(isL1, sats, who = staker) {
+  const idx = bondSetup();
+  if (!isL1) {
+    registerSbtcBond(who, deployer, idx, Math.min(sats, 100_000_000));
+    return null;
+  }
+  const lk = buildLockup(sats, who);
+  registerL1Bond(who, deployer, idx,
+    { tx: lk.tx, header: lk.block.header, amount: sats, unlockHeight: UNLOCK });
+  return lk;
+}
 
 const mktStatus = (id) => {
   const r = simnet.callReadOnlyFn(C, "get-market", [Cl.buffer(id)], deployer);
@@ -195,8 +230,7 @@ describe("resolve-bonded: the full YES claim", () => {
   it("resolves BONDED when every check passes", () => {
     const id = freshId();
     createMarket(id);
-    setBond(true, SNAP_SATS);
-    const lk = buildLockup();
+    const lk = setBond(true, SNAP_SATS);
     expect(resolveBonded(id, lk).result).toBeOk(Cl.uint(1));
     expect(mktStatus(id)).toBe(1);
   });
@@ -210,22 +244,33 @@ describe("resolve-bonded: the full YES claim", () => {
 
   it("REJECTS a bond for a different bond-index", () => {
     const id = freshId();
-    createMarket(id);
-    setBond(true, SNAP_SATS, BOND_INDEX + 1);
-    expect(resolveBonded(id, buildLockup()).result).toBeErr(Cl.uint(208));
+    createMarket(id, 500, THRESHOLD, BOND_INDEX + 1);
+    const lk = setBond(true, SNAP_SATS);
+    expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(208));
   });
 
+  // pox-5 derives amount-sats from the lockup transaction itself, so a staker
+  // cannot simply claim a larger bond than they funded. The real attack is to
+  // bond a little of your own money and then point at somebody else's much
+  // larger snapshot. pox-5 is satisfied; check 6 is not.
   it("REJECTS a bond under the threshold", () => {
     const id = freshId();
     createMarket(id);
-    setBond(true, 50_000_000); // 0.5 BTC against a 1 BTC threshold
+    const idx = bondSetup();
+    const OWN = sha256d(Buffer.from("the staker's own, smaller utxo"));
+    const funded = buildLockup(50_000_000, staker, OWN); // 0.5 BTC really locked
+    registerL1Bond(staker, deployer, idx, {
+      tx: funded.tx, header: funded.block.header,
+      amount: 50_000_000, unlockHeight: UNLOCK,
+    });
+    // now point at the market's 247 BTC snapshot instead
     expect(resolveBonded(id, buildLockup()).result).toBeErr(Cl.uint(209));
   });
 
   it("REJECTS a staker with no pox-5 membership at all", () => {
     const id = freshId();
     createMarket(id);
-    simnet.callPublicFn("mock-pox5", "clear-membership", [Cl.principal(staker)], deployer);
+    bondSetup(); // a real bond exists, but this staker never registered for it
     expect(resolveBonded(id, buildLockup()).result).toBeErr(Cl.uint(206));
   });
 
@@ -233,13 +278,12 @@ describe("resolve-bonded: the full YES claim", () => {
     const id = freshId();
     createMarket(id);
     setBond(true, SNAP_SATS);
-    const c = stakerCommitment(staker);
-    const { script, offset } = lockupScript(c);
+    const { witness, spk, offset } = lockupScriptFor(deployer, staker, UNLOCK);
     const unrelated = ser({
       inputs: [{ txid: sha256d(Buffer.from("someone else's coins")), vout: 0, script: Buffer.alloc(0) }],
-      outputs: [{ value: SNAP_SATS, script: p2wsh(script) }],
+      outputs: [{ value: SNAP_SATS, script: spk }],
     });
-    const lk = { tx: unrelated, script, offset, block: inBlock(unrelated) };
+    const lk = { tx: unrelated, script: witness, offset, block: inSoloBlock(unrelated) };
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(205));
   });
 
@@ -247,21 +291,20 @@ describe("resolve-bonded: the full YES claim", () => {
     const id = freshId();
     createMarket(id);
     setBond(true, SNAP_SATS);
-    // script commits to bob, but we claim it is the staker's
-    const { script, offset } = lockupScript(stakerCommitment(bob));
+    // a real pox-5 lockup script, but one that commits to bob, not the staker
+    const { witness, spk, offset } = lockupScriptFor(deployer, bob, UNLOCK);
     const tx = ser({
       inputs: [{ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) }],
-      outputs: [{ value: SNAP_SATS, script: p2wsh(script) }],
+      outputs: [{ value: SNAP_SATS, script: spk }],
     });
-    const lk = { tx, script, offset, block: inBlock(tx) };
+    const lk = { tx, script: witness, offset, block: inSoloBlock(tx) };
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(313));
   });
 
   it("REJECTS a witness script that does not hash to the output", () => {
     const id = freshId();
     createMarket(id);
-    setBond(true, SNAP_SATS);
-    const lk = buildLockup();
+    const lk = setBond(true, SNAP_SATS);
     lk.script = Buffer.concat([lk.script, Buffer.from([0x51])]); // one byte off
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(310));
   });
@@ -269,16 +312,15 @@ describe("resolve-bonded: the full YES claim", () => {
   it("REJECTS resolving after the window closed", () => {
     const id = freshId();
     createMarket(id, 260);
-    setBond(true, SNAP_SATS);
+    const lk = setBond(true, SNAP_SATS);
     simnet.mineEmptyBurnBlocks(300);
-    expect(resolveBonded(id, buildLockup()).result).toBeErr(Cl.uint(103));
+    expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(103));
   });
 
   it("cannot be resolved twice", () => {
     const id = freshId();
     createMarket(id);
-    setBond(true, SNAP_SATS);
-    const lk = buildLockup();
+    const lk = setBond(true, SNAP_SATS);
     resolveBonded(id, lk);
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(102));
   });
@@ -292,8 +334,8 @@ describe("resolve-bonded: the full YES claim", () => {
     simnet.callPublicFn(C, "transfer-shares",
       [Cl.buffer(id), Cl.uint(0), Cl.uint(1_000_000), Cl.principal(bob)], alice);
 
-    setBond(true, SNAP_SATS);
-    expect(resolveBonded(id, buildLockup()).result).toBeOk(Cl.uint(1));
+    const lk = setBond(true, SNAP_SATS);
+    expect(resolveBonded(id, lk).result).toBeOk(Cl.uint(1));
 
     // Alice held BONDED and was right.
     const before = Number(simnet.callReadOnlyFn(SBTC, "get-balance",

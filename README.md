@@ -83,11 +83,10 @@ real, as does every cycle, allowlist, rollover and custody rule.
 `contracts/test-signer-manager.clar` is the `signer-manager-trait`
 implementation `register-for-bond` demands.
 
-## Why `mock-pox5` is still here
+## The one thing simnet still cannot do
 
-`resolve.test.js` still drives bond state through `mock-pox5` rather than the
-real contract above. Migrating it is the obvious next step now that the real
-flow is proven. Until then:
+There are no mocks left. `resolve.test.js` drives real pox-5 end to end. The
+single remaining substitution is the burn-header check, and it exists because:
 
 The only writer of `protocol-bond-memberships` in real pox-5 is
 `register-for-bond`, which runs `verify-l1-lockups` -> `verify-block-header`:
@@ -103,11 +102,10 @@ same reason `SIM-SKIP-HEADER` exists: simnet serves synthetic burn blocks that
 no real Bitcoin header hashes to. Registration is also allowlist-gated by the
 bond admin and moves real sBTC through `roll-sbtc`.
 
-So against real pox-5 in simnet, `get-bond-membership` returns `none` forever.
-That exercises exactly one rejection path and leaves the other five checks --
-sBTC-vs-L1 bond, wrong bond-index, under-threshold, and the YES path itself --
-untested. `mock-pox5` stands in for that single read-only so those 11 tests can
-run. `build-sim.sh` swaps it in; it never appears in anything deployed.
+`build-pox5-sim.sh` bypasses exactly that assert and nothing else, so every
+other rule -- the lockup script template, amounts, unlock heights, duplicate
+outpoints, allowlists, cycles, rollover, sBTC custody -- is enforced for real.
+The merkle proof underneath it is verified genuinely.
 
 ## Two things the simnet cannot prove
 
@@ -185,7 +183,6 @@ testnet. There is no mock in anything that ships:
 
 - `contracts/at-stake.clar` — the real contract, targeting the ids above.
 - `contracts/btc-parse.clar` — Bitcoin tx parsing and P2WSH lockup checks.
-- `contracts/mock-pox5.clar` — simnet stand-in for one read-only. See below.
 - `build-sim.sh` — generates `contracts/at-stake-sim.clar`. Generated; never
   edit it, never commit it, never deploy it.
 - `tests/market.test.js` — escrow, invariants, solvency.

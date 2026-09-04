@@ -40,11 +40,6 @@ path = "contracts/test-signer-manager.clar"
 clarity_version = 6
 epoch = "4.0"
 
-[contracts.mock-pox5]
-path = "contracts/mock-pox5.clar"
-clarity_version = 6
-epoch = "4.0"
-
 # The real deployable contract. Listed so it is actually type-checked against
 # its live testnet dependencies -- previously only the generated sim build was.
 [contracts.at-stake]
