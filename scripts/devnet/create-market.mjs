@@ -10,14 +10,19 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import {
-  makeContractCall, broadcastTransaction, Cl, AnchorMode, PostConditionMode,
+  makeContractCall, broadcastTransaction, Cl, PostConditionMode,
 } from "@stacks/transactions";
+import { STACKS_DEVNET } from "@stacks/network";
 import {
   rpc, ensureWallet, getNewAddress, sendToAddress, getWalletBalance, mine, WALLET,
 } from "./bitcoin-rpc.mjs";
 import { buildProof } from "./build-proof.mjs";
 
 const NODE = process.env.STACKS_NODE ?? "http://127.0.0.1:20443";
+// STACKS_DEVNET carries the chain id, transaction version and address
+// versions; only the endpoint needs overriding (its default is the API on
+// 3999, which we do not run).
+const NETWORK = { ...STACKS_DEVNET, client: { baseUrl: NODE } };
 // Stock Clarinet devnet deployer (ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM).
 const DEPLOYER_KEY = process.env.DEPLOYER_KEY
   ?? "753b7cc01a1a2e86221266a154af739463fce51219d97e4f856cd7200c3bd2a601";
@@ -81,14 +86,13 @@ async function main() {
       Cl.list(proof.path.map((s) => Cl.buffer(s))),
     ],
     senderKey: DEPLOYER_KEY,
-    network: { client: { baseUrl: NODE } },
-    anchorMode: AnchorMode.Any,
+    network: NETWORK,
     postConditionMode: PostConditionMode.Deny,
     fee: 10000n,
   });
 
   console.log("\nbroadcasting create-market (header check LIVE)...");
-  const res = await broadcastTransaction({ transaction: tx, network: { client: { baseUrl: NODE } } });
+  const res = await broadcastTransaction({ transaction: tx, network: NETWORK });
   if (res.error) throw new Error(`${res.error} ${res.reason ?? ""} ${JSON.stringify(res.reason_data ?? {})}`);
   console.log("txid:", res.txid);
   console.log("market id:", `0x${marketId.toString("hex")}`);

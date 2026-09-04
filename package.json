@@ -22,7 +22,8 @@
     "@types/node": "^26.4.1",
     "chokidar-cli": "^3.0.0",
     "vitest": "^4.1.11",
-    "vitest-environment-clarinet": "^3.0.2"
+    "vitest-environment-clarinet": "^3.0.2",
+    "@stacks/network": "^7.6.0"
   },
   "engines": {
     "npm": ">=11"
