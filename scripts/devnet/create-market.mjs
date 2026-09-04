@@ -35,13 +35,34 @@ const hex = (h) => Buffer.from(String(h).replace(/^0x/, ""), "hex");
 const burnHeight = async () =>
   fetch(`${NODE}/v2/info`).then((r) => r.json()).then((i) => i.burn_block_height);
 
+// Mining a burst of blocks floods the Nakamoto signer with sortitions and
+// stalls block production outright ("Sortition has timed out"). Feed them in
+// small batches and let the Stacks node keep pace.
+async function mineGently(total, address, batch = 5) {
+  for (let done = 0; done < total; done += batch) {
+    await mine(Math.min(batch, total - done), address);
+    await waitForNode();
+  }
+}
+
+// Block until the Stacks node has caught up with bitcoind.
+async function waitForNode(slack = 2) {
+  for (let i = 0; i < 120; i++) {
+    const [btc, stx] = [await rpc("getblockcount"), await burnHeight()];
+    if (btc - stx <= slack) return;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error("stacks-node fell behind bitcoind and did not recover");
+}
+
 async function main() {
   await ensureWallet();
 
   // Fund ourselves if this is a fresh chain.
   if ((await getWalletBalance()) < 2) {
-    console.log("mining 110 blocks for spendable coinbase...");
-    await mine(110, await getNewAddress("mining"));
+    console.log("mining 110 blocks for spendable coinbase (in batches)...");
+    await mineGently(110, await getNewAddress("mining"));
+    console.log("funded:", await getWalletBalance(), "BTC");
   }
 
   // The "subject wallet" the market asks about.
@@ -51,6 +72,7 @@ async function main() {
   // Its funding transaction. MIN_SNAPSHOT_SATS in at-stake.clar is 1 BTC.
   const txid = await sendToAddress(subject, 1.0);
   await mine(1);
+  await waitForNode();
   console.log("funding txid   :", txid);
 
   // Which output pays the subject, and what is its scriptPubKey?
