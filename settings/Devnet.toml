@@ -88,13 +88,14 @@ sbtc_balance = 1_000_000_000
 # are debugging, so it stays on. The explorers do not: reach them by tunnel if
 # you want them, or flip these to false.
 #
-# The API and postgres are OFF: nothing in scripts/devnet/ needs them, and the
-# box runs other services. Turn both on (~1.5 GB) when wiring a UI -- stacks.js
-# and @stacks/connect query the API on 3999, not the node RPC.
+# The API and postgres are ON because the UI needs them: stacks.js and
+# @stacks/connect query the API on 3999, not the node RPC. Costs ~1.5 GB.
+# Nothing in scripts/devnet/ depends on them, so turn both off if the box
+# gets tight -- the proof rig only needs bitcoind and the node RPC.
 disable_stacks_explorer = true
 disable_bitcoin_explorer = true
-disable_stacks_api = true
-disable_postgres = true
+disable_stacks_api = false
+disable_postgres = false
 
 # bitcoind. This is the whole point of devnet: a REAL Bitcoin node, in regtest,
 # that we control. get-burn-block-info? returns genuine headers from this
