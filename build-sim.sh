@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Generates the simnet build from the deployable contract.
+#
+# at-stake.clar targets what is actually live on the PoX-5 testnet:
+#   sBTC  SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token
+#   pox-5 ST000000000000000000002AMW42H.pox-5
+#
+# Three things have to give in simnet, and all three are confined to this file
+# so the deployed contract never carries a test affordance:
+#
+#   1. sBTC. Clarinet only auto-funds SM3VDXK3...sbtc-token -- that id is
+#      hardcoded in the clarinet binary. Same sBTC source, mainnet address.
+#      Naming sbtc-deposit in Clarinet.toml is what preloads the wallets.
+#   2. pox-5. The real contract is present in simnet (it is an epoch-4.0 boot
+#      contract), but bond membership can only be created via register-for-bond,
+#      which verifies BTC lockup proofs against real burn headers. Simnet serves
+#      synthetic burn blocks, so that state is unreachable -- hence mock-pox5,
+#      which stands in for exactly one read-only: get-bond-membership.
+#   3. The header check, for the same synthetic-burn-block reason.
+#
+# contracts/at-stake-sim.clar is generated. Never edit it, never deploy it.
+set -e
+sed -e "s|'SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token|'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token|g" \
+    -e "s|'ST000000000000000000002AMW42H.pox-5|'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.mock-pox5|g" \
+    -e "s|(asserts! (is-eq our-hash chain-hash) ERR_BAD_HEADER)|(asserts! (or SIM-SKIP-HEADER (is-eq our-hash chain-hash)) ERR_BAD_HEADER)|" \
+    -e "s|^(define-constant MIN_SNAPSHOT_SATS|(define-constant SIM-SKIP-HEADER true) ;; SIMNET ONLY\n(define-constant MIN_SNAPSHOT_SATS|" \
+  contracts/at-stake.clar > contracts/at-stake-sim.clar
+cat >> contracts/at-stake-sim.clar <<'SIM'
+
+;; ===== SIMNET ONLY. Not present in the deployed contract. =====
+(define-public (test-seed-market (id (buff 32)) (script (buff 34)) (bond-index uint)
+                                 (close-height uint) (threshold-sats uint) (snapshot-sats uint))
+  (begin
+    (map-set markets { id: id }
+      { script: script, bond-index: bond-index, close-height: close-height,
+        threshold-sats: threshold-sats, snapshot-sats: snapshot-sats,
+        status: STATUS_OPEN, vault: u0, idle-circ: u0, bonded-circ: u0 })
+    (ok true)))
+
+(define-public (test-set-bonded (id (buff 32)))
+  (let ((m (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET)))
+    (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
+    (ok true)))
+
+(define-public (test-cost-merkle (leaf (buff 32)) (index uint) (path (list 14 (buff 32))))
+  (ok (merkle-root-from-proof leaf index path)))
+SIM
+echo "built contracts/at-stake-sim.clar"
