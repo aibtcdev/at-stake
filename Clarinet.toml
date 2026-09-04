@@ -1,0 +1,64 @@
+[project]
+name = "atstake"
+description = "Prediction market on whether specific BTC entered a Stacks protocol bond"
+authors = []
+telemetry = false
+cache_dir = "./.cache"
+
+# The official sBTC contracts. Naming `sbtc-deposit` is what makes Clarinet
+# preload every simnet wallet with sBTC (the `sbtc_balance` in
+# settings/Devnet.toml), so tests never mint their own money.
+#
+# These are the MAINNET ids on purpose: `SM3VDXK3...sbtc-token` is the only
+# contract Clarinet's auto-funding recognises. The deployed contract targets
+# the testnet address of the same sBTC -- see build-sim.sh.
+#
+# pox-5 needs no requirement: `ST000000000000000000002AMW42H.pox-5` is a boot
+# contract and is already present in simnet at epoch 4.0.
+[[project.requirements]]
+contract_id = 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-deposit'
+
+[[project.requirements]]
+contract_id = "SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token"
+
+# Ordered by dependency. `at-stake.clar` itself is deliberately NOT listed:
+# it points at mainnet sBTC, which simnet cannot see. `build-sim.sh` derives
+# `at-stake-sim.clar` from it by swapping in the testnet sBTC. See CLAUDE.md.
+
+[contracts.btc-parse]
+path = "contracts/btc-parse.clar"
+clarity_version = 6
+epoch = "4.0"
+
+[contracts.pox5-sim]
+path = "contracts/pox5-sim.clar"
+clarity_version = 6
+epoch = "4.0"
+
+[contracts.test-signer-manager]
+path = "contracts/test-signer-manager.clar"
+clarity_version = 6
+epoch = "4.0"
+
+[contracts.mock-pox5]
+path = "contracts/mock-pox5.clar"
+clarity_version = 6
+epoch = "4.0"
+
+# The real deployable contract. Listed so it is actually type-checked against
+# its live testnet dependencies -- previously only the generated sim build was.
+[contracts.at-stake]
+path = "contracts/at-stake.clar"
+clarity_version = 6
+epoch = "4.0"
+
+[contracts.at-stake-sim]
+path = "contracts/at-stake-sim.clar"
+clarity_version = 6
+epoch = "4.0"
+
+[repl.analysis]
+passes = ["check_checker"]
+# The Bitcoin parsers take untrusted buffers by design and validate them
+# internally, so let the checker follow the value into the callee.
+check_checker = { trusted_sender = false, trusted_caller = false, callee_filter = true }
