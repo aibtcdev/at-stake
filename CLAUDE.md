@@ -165,8 +165,25 @@ That is what v4 exists for.
 
 ## Costs
 
-Historical, from wrappers no longer in the tree: merkle 12-deep 44,557; 10-input
-spend detection 828,466; 10-output extraction 1,205,416, against a 5e9 block
-limit. v3 adds a second SPV proof, so a full resolve is roughly double v2's
-~2.1M — still well under 0.1% of a block. **The fully on-chain resolver is
-affordable. Do not add a challenge-window fallback "for cost."**
+Measured 5 Sep 2026 against a 5e9 runtime block limit, `vitest run -- --costs`.
+
+| call | runtime | % of a block |
+|---|---|---|
+| `resolve-bonded` (full YES) | 1,984,168 | 0.040% |
+| `tx-spends-outpoint`, 50 inputs | 4,036,683 | 0.081% |
+| `tx-spends-outpoint`, 1 input | 188,145 | 0.004% |
+| `create-market` | 843,212 | 0.017% |
+| `add-snapshot` | 709,155 | 0.014% |
+| `fill-order` | 54,291 | 0.001% |
+| mint / merge / redeem | ~44,000 | 0.001% |
+
+2,519 full resolves fit in one block. Worst read count is 53 against a 15,000
+limit; worst write count is 4.
+
+Delegating to the builtins and pox-5 made a resolve *cheaper* than the
+hand-rolled v2 (0.038% vs 0.042%) despite a 4x larger transaction buffer.
+
+`MAX_INPUTS` is a real cost lever, not a free ceiling: `fold` walks the whole
+index list whatever the transaction holds, so each unused slot costs ~3,000.
+Raising 24 -> 50 took a one-input check from 110,453 to 188,145. Rejection past
+the cap is cheap (53,628) because it happens before the fold.
