@@ -17,7 +17,7 @@ const IDLE = 0, BONDED = 1;
 const SBTC = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token";
 
 const seed = () => simnet.callPublicFn(C, "test-seed-market", [
-  Cl.uint(ID), Cl.stringAscii("test market"), Cl.buffer(new Uint8Array(34).fill(1)),
+  Cl.uint(ID), Cl.stringAscii("test market"), Cl.buffer(new Uint8Array(34).fill(1)), Cl.none(),
   Cl.uint(1), Cl.uint(CLOSE), Cl.uint(0), Cl.uint(100_000_000), Cl.uint(24_700_000_000)], deployer);
 const mint = (w, n) => simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(n)], w);
 const xfer = (w, side, n, to) => simnet.callPublicFn(C, "transfer-shares",

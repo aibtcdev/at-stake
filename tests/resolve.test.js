@@ -104,10 +104,10 @@ const SNAP_TXID = sha256d(snapTx);
 // (script, close-height, threshold), so distinct markets need distinct terms --
 // varying close-height is enough.
 function createMarketRaw(closeHeight, threshold = THRESHOLD, title = "will it bond",
-                         bondIndex = BOND_INDEX) {
+                         bondIndex = BOND_INDEX, namedStaker = Cl.none()) {
   const b = inBlock(snapTx);
   return simnet.callPublicFn(C, "create-market", [
-    Cl.stringAscii(title), Cl.buffer(WALLET_SPK), Cl.uint(bondIndex),
+    Cl.stringAscii(title), Cl.buffer(WALLET_SPK), namedStaker, Cl.uint(bondIndex),
     Cl.uint(closeHeight), Cl.uint(threshold),
     Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
     Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
@@ -246,7 +246,7 @@ describe("create-market: proving the snapshot on chain", () => {
     });
     const b = inBlock(small);
     const r = simnet.callPublicFn(C, "create-market", [
-      Cl.stringAscii("zero value"), Cl.buffer(WALLET_SPK), Cl.uint(BOND_INDEX), Cl.uint(710),
+      Cl.stringAscii("zero value"), Cl.buffer(WALLET_SPK), Cl.none(), Cl.uint(BOND_INDEX), Cl.uint(710),
       Cl.uint(THRESHOLD), Cl.buffer(small), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
       Cl.list(b.path.map((x) => Cl.buffer(x))),
@@ -258,7 +258,7 @@ describe("create-market: proving the snapshot on chain", () => {
     const b = inBlock(snapTx);
     const r = simnet.callPublicFn(C, "create-market", [
       Cl.stringAscii("wrong wallet"), Cl.buffer(p2wpkh(Buffer.alloc(20, 0x99))),
-      Cl.uint(BOND_INDEX), Cl.uint(711), Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
+      Cl.none(), Cl.uint(BOND_INDEX), Cl.uint(711), Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
       Cl.list(b.path.map((x) => Cl.buffer(x))),
     ], alice);
@@ -269,7 +269,7 @@ describe("create-market: proving the snapshot on chain", () => {
     const b = inBlock(snapTx);
     const badPath = b.path.map(() => sha256d(Buffer.from("nope")));
     const r = simnet.callPublicFn(C, "create-market", [
-      Cl.stringAscii("forged proof"), Cl.buffer(WALLET_SPK), Cl.uint(BOND_INDEX), Cl.uint(712),
+      Cl.stringAscii("forged proof"), Cl.buffer(WALLET_SPK), Cl.none(), Cl.uint(BOND_INDEX), Cl.uint(712),
       Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
       Cl.list(badPath.map((x) => Cl.buffer(x))),
@@ -475,6 +475,25 @@ describe("resolve-bonded: the full YES claim", () => {
     const lk = setBond(true, SNAP_SATS, staker, OTHER_COIN_TXID);
     expect(resolveBonded(id, lk, bob, staker, null,
       { fundingTxid: OTHER_COIN_TXID, fundingVout: 0 }).result).toBeOk(Cl.uint(1));
+  });
+
+  // The borrowed-membership hole, closed for markets that name who must bond.
+  // pox-5 records that a staker is a member but never which Bitcoin backs it,
+  // so an unnamed market can be settled against any stranger's live bond.
+  it("REJECTS a stranger's membership when the market names a staker", () => {
+    const r = createMarketRaw(750, THRESHOLD, "named", BOND_INDEX, Cl.some(Cl.principal(alice)));
+    const id = Number(r.result.value.value);
+    simnet.mineEmptyBurnBlocks(1);
+    const lk = setBond(true, SNAP_SATS, staker);   // a real bond, wrong person
+    expect(resolveBonded(id, lk, bob, staker).result).toBeErr(Cl.uint(126));
+  });
+
+  it("SETTLES when the named staker is the one who bonded", () => {
+    const r = createMarketRaw(751, THRESHOLD, "named ok", BOND_INDEX, Cl.some(Cl.principal(staker)));
+    const id = Number(r.result.value.value);
+    simnet.mineEmptyBurnBlocks(1);
+    const lk = setBond(true, SNAP_SATS, staker);
+    expect(resolveBonded(id, lk).result).toBeOk(Cl.uint(1));
   });
 
   it("REJECTS a real pox-5 lockup built for a later unlock height", () => {
