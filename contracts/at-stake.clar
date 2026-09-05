@@ -49,6 +49,7 @@
 (define-constant ERR_TOO_MANY           (err u302))
 (define-constant ERR_NOT_A_LOCKUP       (err u313))
 (define-constant ERR_NO_BOND            (err u211))
+(define-constant ERR_UNLOCK_TOO_EARLY   (err u212))
 
 (define-constant MIN_FILL_BPS u100)
 
@@ -376,6 +377,7 @@
                  (id uint)
                  (bond-index uint)
                  (staker principal)
+                 (unlock-burn-height uint)
                  (staker-unlock-bytes (buff 683))
                  (lockup-tx (buff 16384))
                  (lockup-vout uint)
@@ -395,7 +397,7 @@
         (lockup  (unwrap! (get-bitcoin-tx-output? lockup-tx lockup-vout) ERR_PARSE))
         (funded  (unwrap! (get-bitcoin-tx-output? funding-tx funding-vout) ERR_PARSE))
         (bond    (unwrap! (contract-call? POX5 get-protocol-bond bond-index) ERR_NO_BOND))
-        (unlock  (contract-call? POX5 get-bond-l1-unlock-height bond-index)))
+        (floor   (contract-call? POX5 get-bond-l1-unlock-height bond-index)))
     ;; 1. open and inside the window
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
@@ -414,9 +416,12 @@
     (asserts! (try! (tx-spends-outpoint lockup-tx (get txid funded) funding-vout))
               ERR_NOT_SPENT)
     ;; 5. a real pox-5 lockup for this bond period
+    ;;    pox-5 treats the period's unlock height as a floor, not an exact
+    ;;    value: a staker may lock for longer. Mirror that or valid bonds fail.
+    (asserts! (>= unlock-burn-height floor) ERR_UNLOCK_TOO_EARLY)
     (asserts! (is-eq (get script lockup)
                      (try! (contract-call? POX5 construct-lockup-output-script
-                              staker unlock staker-unlock-bytes
+                              staker unlock-burn-height staker-unlock-bytes
                               (get early-unlock-bytes bond))))
               ERR_NOT_A_LOCKUP)
     (asserts! (>= (get amount lockup) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
