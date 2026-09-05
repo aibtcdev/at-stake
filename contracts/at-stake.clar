@@ -2,12 +2,6 @@
 
 (define-constant MIN_SNAPSHOT_SATS u1)
 
-;; Shortest market anyone may open, in burn blocks (~1 day).
-;;
-;; A bond takes real time: the staker has to build a Bitcoin timelock and
-;; register it. Any window shorter than that cannot resolve YES no matter what
-;; happens, so a one-block market is not a question, it is a guaranteed NO with
-;; a question's wording. This is the same lever as an unreachable threshold.
 (define-constant MIN_WINDOW_BLOCKS u144)
 
 (define-constant STATUS_OPEN   u0)
@@ -47,96 +41,136 @@
 (define-constant ERR_FILL_TOO_LARGE     (err u118))
 (define-constant ERR_WINDOW_TOO_SHORT   (err u119))
 (define-constant ERR_FLOOR_NOT_FORWARD  (err u120))
+(define-constant ERR_PARSE              (err u300))
+(define-constant ERR_TOO_MANY           (err u302))
+(define-constant ERR_NOT_A_LOCKUP       (err u313))
+(define-constant ERR_NO_BOND            (err u211))
 
-;; Smallest slice of an order anyone may take. Without a floor, a griefer can
-;; chew an order away one share at a time, each nibble costing the book a state
-;; write and the seller a fee-bearing settlement.
-(define-constant MIN_FILL_BPS u100) ;; 1% of the order
+(define-constant MIN_FILL_BPS u100)
 
-;; Markets are numbered, so a UI can say "#7" instead of a hash.
 (define-data-var next-market-id uint u1)
 
 (define-map markets
   { id: uint }
   {
-    title:          (string-ascii 64),  ;; a display label, NOT the terms
-    subject-script: (buff 34),          ;; scriptPubKey of the wallet in question
-    close-height:   uint,               ;; BURN height
-    created-at:     uint,               ;; BURN height at creation
+    title:          (string-ascii 64),
+    subject-script: (buff 34),
+    close-height:   uint,
+    created-at:     uint,
     threshold-sats: uint,
     snapshot-sats:  uint,
     status:         uint,
-    vault:          uint,               ;; sBTC sats held for this market
+    vault:          uint,
     idle-circ:      uint,
     bonded-circ:    uint
   })
 
-;; Same question -> same hash -> the second create is rejected.
 (define-map market-by-terms { terms: (buff 32) } { id: uint })
 
 (define-map positions
   { id: uint, who: principal }
   { idle: uint, bonded: uint })
 
-;; Signed orders are one-shot. Filling one records its hash so it cannot be
-;; replayed against the seller.
 (define-map filled-orders { hash: (buff 32) } { filled: uint })
 
-;; A seller's nonce floor. Orders signed below it are dead, so one transaction
-;; revokes every outstanding offer without having to name them.
 (define-map order-floor { seller: principal } { min-nonce: uint })
 
-;; Bitcoin block hashes are reported reversed; merkle math is internal order.
-(define-private (reverse-buff16 (input (buff 16)))
-  (unwrap-panic (slice? (unwrap-panic (to-consensus-buff? (buff-to-uint-le input))) u1 u17)))
+(define-constant POX5 'SP000000000000000000002Q6VF78.pox-5)
 
-(define-read-only (reverse-buff32 (input (buff 32)))
-  (unwrap-panic (as-max-len?
-    (concat
-      (reverse-buff16 (unwrap-panic (as-max-len? (unwrap-panic (slice? input u16 u32)) u16)))
-      (reverse-buff16 (unwrap-panic (as-max-len? (unwrap-panic (slice? input u0 u16)) u16))))
-    u32)))
+(define-constant MAX_INPUTS u24)
+(define-constant IDX (list
+  u0  u1  u2  u3  u4  u5  u6  u7  u8  u9  u10 u11
+  u12 u13 u14 u15 u16 u17 u18 u19 u20 u21 u22 u23))
 
-(define-read-only (sha256d (data (buff 4096)))
-  (sha256 (sha256 data)))
+(define-read-only (read-u8 (tx (buff 16384)) (pos uint))
+  (match (element-at? tx pos)
+    b (some (buff-to-uint-be b))
+    none))
 
-;; A block header is 80 bytes. Bytes 36..68 are the merkle root.
-(define-read-only (header-merkle-root (header (buff 80)))
-  (slice? header u36 u68))
+(define-read-only (read-u32-le (tx (buff 16384)) (pos uint))
+  (match (slice? tx pos (+ pos u4))
+    b (match (as-max-len? b u16) bb (some (buff-to-uint-le bb)) none)
+    none))
 
-(define-read-only (merkle-step (cur (buff 32)) (sibling (buff 32)) (right bool))
-  (if right
-      (sha256d (unwrap-panic (as-max-len? (concat sibling cur) u4096)))
-      (sha256d (unwrap-panic (as-max-len? (concat cur sibling) u4096)))))
+;; Bitcoin compact-size integer: the value, and how many bytes it used.
+(define-read-only (read-varint (tx (buff 16384)) (pos uint))
+  (match (read-u8 tx pos)
+    first
+      (if (< first u253)
+          (some { val: first, size: u1 })
+          (if (is-eq first u253)
+              (match (slice? tx (+ pos u1) (+ pos u3))
+                b (match (as-max-len? b u16) bb (some { val: (buff-to-uint-le bb), size: u3 }) none)
+                none)
+              (if (is-eq first u254)
+                  (match (slice? tx (+ pos u1) (+ pos u5))
+                    b (match (as-max-len? b u16) bb (some { val: (buff-to-uint-le bb), size: u5 }) none)
+                    none)
+                  (match (slice? tx (+ pos u1) (+ pos u9))
+                    b (match (as-max-len? b u16) bb (some { val: (buff-to-uint-le bb), size: u9 }) none)
+                    none))))
+    none))
 
-(define-private (merkle-fold
-                  (sibling (buff 32))
-                  (acc { hash: (buff 32), idx: uint }))
-  { hash: (merkle-step (get hash acc) sibling (is-eq (mod (get idx acc) u2) u1)),
-    idx:  (/ (get idx acc) u2) })
+;; Walk one input: txid(32) vout(4) varint scriptlen, script, sequence(4).
+(define-private (skip-input
+                  (i uint)
+                  (acc { tx: (buff 16384), pos: uint, n: uint, ok: bool,
+                         hits: uint, want-txid: (buff 32), want-vout: uint }))
+  (if (or (not (get ok acc)) (>= i (get n acc)))
+      acc
+      (let ((tx (get tx acc))
+            (p  (get pos acc)))
+        (match (slice? tx p (+ p u32))
+          prev-raw
+            (match (read-u32-le tx (+ p u32))
+              vout
+                (match (read-varint tx (+ p u36))
+                  vi
+                    (let ((next (+ p u36 (get size vi) (get val vi) u4))
+                          (matched (and (is-eq (unwrap-panic (as-max-len? prev-raw u32))
+                                               (get want-txid acc))
+                                        (is-eq vout (get want-vout acc)))))
+                      (merge acc { pos: next,
+                                   hits: (if matched (+ (get hits acc) u1) (get hits acc)) }))
+                  (merge acc { ok: false }))
+              (merge acc { ok: false }))
+          (merge acc { ok: false })))))
 
-(define-read-only (merkle-root-from-proof
-                    (leaf (buff 32))
-                    (index uint)
-                    (path (list 14 (buff 32))))
-  (get hash (fold merkle-fold path { hash: leaf, idx: index })))
+(define-read-only (tx-spends-outpoint
+                    (tx (buff 16384))
+                    (prev-txid (buff 32))
+                    (prev-vout uint))
+  (match (read-varint tx u4)
+    vin-count
+      (if (> (get val vin-count) MAX_INPUTS)
+          ERR_TOO_MANY
+          (let ((r (fold skip-input IDX
+                     { tx: tx, pos: (+ u4 (get size vin-count)),
+                       n: (get val vin-count), ok: true, hits: u0,
+                       want-txid: prev-txid, want-vout: prev-vout })))
+            (if (get ok r) (ok (> (get hits r) u0)) ERR_PARSE)))
+    ERR_PARSE))
 
-;; The header is the block at that burn height, and the txid sits under its root.
-(define-read-only (tx-was-mined
+;; Is this txid in a block Bitcoin actually mined?
+(define-private (tx-was-mined
                     (burn-height uint)
                     (header (buff 80))
-                    (txid (buff 32))
+                    (reversed-txid (buff 32))
                     (tx-index uint)
-                    (path (list 14 (buff 32))))
-  (let ((chain-hash (unwrap! (get-burn-block-info? header-hash burn-height) ERR_NO_BURN_BLOCK))
-        (our-hash   (sha256d (unwrap-panic (as-max-len? header u4096))))
-        (root       (unwrap! (header-merkle-root header) ERR_BAD_HEADER)))
-    (asserts! (is-eq (reverse-buff32 our-hash) chain-hash) ERR_BAD_HEADER)
-    (asserts! (is-eq (merkle-root-from-proof txid tx-index path) root) ERR_BAD_MERKLE)
+                    (tx-count uint)
+                    (hashes (list 14 (buff 32))))
+  (let ((block (unwrap! (contract-call? POX5 parse-block-header header) ERR_BAD_HEADER)))
+    (asserts! (contract-call? POX5 verify-block-header header burn-height) ERR_BAD_HEADER)
+    (asserts! (or
+                ;; sole transaction in the block
+                (is-eq (get merkle-root block)
+                       (contract-call? POX5 reverse-buff32 reversed-txid))
+                (verify-merkle-proof reversed-txid
+                  (contract-call? POX5 reverse-buff32 (get merkle-root block))
+                  tx-index tx-count hashes))
+              ERR_BAD_MERKLE)
     (ok true)))
 
-;; The question, hashed. Title is deliberately excluded: renaming a market must
-;; not let you open a duplicate of it.
 (define-read-only (terms-of (subject-script (buff 34)) (close-height uint) (threshold-sats uint))
   (sha256 (concat (concat subject-script
                           (unwrap-panic (to-consensus-buff? close-height)))
@@ -154,43 +188,40 @@
 (define-read-only (get-next-market-id)
   (var-get next-market-id))
 
-;; Open a market. The snapshot proves the wallet really holds coins; it does not
-;; pin which coins must later be bonded.
 (define-public (create-market
                  (title (string-ascii 64))
                  (subject-script (buff 34))
                  (close-height uint)
                  (threshold-sats uint)
-                 (snap-tx (buff 4096))
+                 (snap-tx (buff 16384))
                  (snap-vout uint)
                  (burn-height uint)
                  (header (buff 80))
                  (tx-index uint)
+                 (tx-count uint)
                  (merkle-path (list 14 (buff 32))))
-  (let ((txid  (contract-call? .btc-parse tx-id snap-tx))
+  (let ((out   (unwrap! (get-bitcoin-tx-output? snap-tx snap-vout) ERR_PARSE))
         (terms (terms-of subject-script close-height threshold-sats))
         (id    (var-get next-market-id)))
     (asserts! (> (len title) u0) ERR_TITLE_EMPTY)
     (asserts! (is-none (map-get? market-by-terms { terms: terms })) ERR_EXISTS)
     (asserts! (>= close-height (+ burn-block-height MIN_WINDOW_BLOCKS)) ERR_WINDOW_TOO_SHORT)
-    (try! (tx-was-mined burn-height header txid tx-index merkle-path))
-    (let ((out (try! (contract-call? .btc-parse get-output snap-tx snap-vout))))
-      (asserts! (is-eq (get script out) (unwrap-panic (as-max-len? subject-script u128)))
-                ERR_WRONG_SCRIPT)
-      (asserts! (>= (get value out) MIN_SNAPSHOT_SATS) ERR_SNAPSHOT_TOO_SMALL)
-      ;; A threshold above the coins on offer would make YES unreachable; zero
-      ;; would let a dust bond claim it.
-      (asserts! (and (> threshold-sats u0) (<= threshold-sats (get value out)))
+    (try! (tx-was-mined burn-height header (get txid out) tx-index tx-count merkle-path))
+    (begin
+      (asserts! (is-eq (get script out) subject-script) ERR_WRONG_SCRIPT)
+      (asserts! (>= (get amount out) MIN_SNAPSHOT_SATS) ERR_SNAPSHOT_TOO_SMALL)
+      ;; a threshold above the snapshot can never be met
+      (asserts! (and (> threshold-sats u0) (<= threshold-sats (get amount out)))
                 ERR_BAD_THRESHOLD)
       (var-set next-market-id (+ id u1))
       (map-set market-by-terms { terms: terms } { id: id })
       (map-set markets { id: id }
         { title: title, subject-script: subject-script, close-height: close-height,
           created-at: burn-block-height, threshold-sats: threshold-sats,
-          snapshot-sats: (get value out), status: STATUS_OPEN,
+          snapshot-sats: (get amount out), status: STATUS_OPEN,
           vault: u0, idle-circ: u0, bonded-circ: u0 })
       (print { event: "create", id: id, title: title, terms: terms,
-               snapshot-sats: (get value out), close-height: close-height,
+               snapshot-sats: (get amount out), close-height: close-height,
                created-at: burn-block-height })
       (ok id))))
 
@@ -200,8 +231,7 @@
     (asserts! (> sats u0) ERR_ZERO)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
-    ;; State first, then the transfer: never leave a window where the books and
-    ;; the vault disagree.
+    ;; write state before the transfer
     (map-set positions { id: id, who: tx-sender }
              { idle: (+ (get idle pos) sats), bonded: (+ (get bonded pos) sats) })
     (map-set markets { id: id }
@@ -242,8 +272,7 @@
     (asserts! (not (is-eq to from)) ERR_SELF_TRANSFER)
     (asserts! (or (is-eq side SIDE_IDLE) (is-eq side SIDE_BONDED)) ERR_BAD_SIDE)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
-    ;; Past the deadline the answer is settled even if nobody has called
-    ;; resolve-idle yet. Trading in that gap is buying a known outcome.
+    ;; no trading past the deadline: the outcome is already known
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     (if (is-eq side SIDE_IDLE)
         (begin
@@ -257,18 +286,6 @@
     (print { event: "transfer", id: id, side: side, amount: amount, from: from, to: to })
     (ok amount)))
 
-;; What a seller signs. Nothing here is secret: the buyer needs every field to
-;; reconstruct the hash, and the signature is what makes it binding.
-;; The hash does two jobs, and both dictate what has to be in it.
-;;
-;; It is what the seller signs, so tampering with any term breaks the signature.
-;; It is also the order's identity in `filled-orders`, so it must be unique to
-;; ONE order -- omit the seller and two people signing the same terms share a
-;; fill counter, and the first fill kills the other's offer.
-;;
-;; `contract` is a domain separator: without it a signature is equally valid on
-;; any other deployment carrying this function, so an old order could be
-;; replayed against a fork to take shares at a stale price.
 (define-read-only (order-hash
                     (seller principal) (id uint) (side uint) (amount uint)
                     (price-sats uint) (nonce uint) (expiry uint))
@@ -279,9 +296,6 @@
 (define-read-only (get-order-floor (seller principal))
   (default-to u0 (get min-nonce (map-get? order-floor { seller: seller }))))
 
-;; Revoke every order signed with a nonce below `min-nonce`. Cheaper and more
-;; reliable than cancelling offers one at a time, and it cannot be front-run
-;; into a partial state: either the floor moves or it does not.
 (define-public (cancel-orders-below (min-nonce uint))
   (begin
     (asserts! (> min-nonce (get-order-floor tx-sender)) ERR_FLOOR_NOT_FORWARD)
@@ -292,33 +306,16 @@
 (define-read-only (order-filled (hash (buff 32)))
   (default-to u0 (get filled (map-get? filled-orders { hash: hash }))))
 
-;; What `fill-amount` of an order costs, rounded UP.
-;;
-;; Floor division is a theft path: 680 sats for 1000 shares makes one share
-;; cost (680 * 1 / 1000) = 0, so an order can be taken apart for nothing a
-;; share at a time. Rounding up puts the fraction on the buyer, where it
-;; belongs.
+;; Cost of a partial fill, rounded up.
 (define-read-only (fill-price (price-sats uint) (amount uint) (fill-amount uint))
   (if (is-eq amount u0)
       u0
       (/ (+ (* price-sats fill-amount) (- amount u1)) amount)))
 
-;; The smallest slice this order accepts. Always at least one share, and a
-;; final remainder is always fillable however small it is -- otherwise the tail
-;; of every order would be stranded.
 (define-read-only (min-fill-for (amount uint))
   (let ((floor-amt (/ (* amount MIN_FILL_BPS) u10000)))
     (if (> floor-amt u0) floor-amt u1)))
 
-;; Settle an off-chain order on chain, both legs or neither.
-;;
-;; transfer-shares alone cannot be used to trade with a stranger: it moves
-;; shares and nothing else, so somebody has to go first and hope. Here the
-;; shares and the sBTC move in one transaction, and the price lands in an event
-;; where an indexer can see it -- the contract otherwise has no idea what
-;; anything sold for.
-;;
-;; The book itself stays off chain. This only settles what it matched.
 (define-public (fill-order
                  (id uint) (side uint) (amount uint) (price-sats uint)
                  (nonce uint) (expiry uint)
@@ -334,22 +331,20 @@
         (cost      (fill-price price-sats amount fill-amount)))
     (asserts! (> amount u0) ERR_ZERO)
     (asserts! (> fill-amount u0) ERR_ZERO)
-    ;; "nothing left" is a clearer answer than "too much", so check it first
     (asserts! (< already amount) ERR_ORDER_FILLED)
     (asserts! (<= fill-amount remaining) ERR_FILL_TOO_LARGE)
-    ;; take at least the minimum, unless you are clearing the tail
+    ;; at least the minimum slice, or whatever is left
     (asserts! (or (>= fill-amount (min-fill-for amount))
                   (is-eq fill-amount remaining))
               ERR_FILL_TOO_SMALL)
     (asserts! (not (is-eq seller buyer)) ERR_SELF_TRANSFER)
     (asserts! (or (is-eq side SIDE_IDLE) (is-eq side SIDE_BONDED)) ERR_BAD_SIDE)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
-    ;; Same gap as transfer-shares: an unresolved market past its deadline has
-    ;; a certain outcome, so a stale order there is free money for the buyer.
+    ;; no trading past the deadline: the outcome is already known
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     (asserts! (<= burn-block-height expiry) ERR_ORDER_EXPIRED)
     (asserts! (>= nonce (get-order-floor seller)) ERR_ORDER_CANCELLED)
-    ;; the order is only an order if the seller actually signed it
+    ;; the seller must have signed it
     (asserts! (is-eq (unwrap! (principal-of? (unwrap! (secp256k1-recover? hash signature)
                                                       ERR_BAD_SIG))
                               ERR_BAD_SIG)
@@ -372,68 +367,67 @@
              price-sats: price-sats, seller: seller, buyer: buyer, hash: hash })
     (ok fill-amount)))
 
-;; The YES claim. The caller brings evidence and asserts nothing.
-;;
-;; Two SPV proofs, not one. The funding proof is what makes this a market about
-;; a WALLET rather than about a single pre-named coin: it shows the bonded coins
-;; came from the subject's own script, whichever UTXO they happened to be.
+;; Settle YES. Anyone may call it; the caller brings the proofs.
 (define-public (resolve-bonded
                  (id uint)
+                 (bond-index uint)
                  (staker principal)
-                 (lockup-tx (buff 4096))
+                 (staker-unlock-bytes (buff 683))
+                 (lockup-tx (buff 16384))
                  (lockup-vout uint)
                  (lockup-burn-height uint)
                  (lockup-header (buff 80))
                  (lockup-tx-index uint)
+                 (lockup-tx-count uint)
                  (lockup-path (list 14 (buff 32)))
-                 (witness-script (buff 512))
-                 (commitment-offset uint)
-                 (funding-tx (buff 4096))
+                 (funding-tx (buff 16384))
                  (funding-vout uint)
                  (funding-burn-height uint)
                  (funding-header (buff 80))
                  (funding-tx-index uint)
+                 (funding-tx-count uint)
                  (funding-path (list 14 (buff 32))))
-  (let ((m           (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (lockup-txid (contract-call? .btc-parse tx-id lockup-tx))
-        (funding-txid (contract-call? .btc-parse tx-id funding-tx)))
-    ;; 1. still open, still inside the window
+  (let ((m       (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
+        (lockup  (unwrap! (get-bitcoin-tx-output? lockup-tx lockup-vout) ERR_PARSE))
+        (funded  (unwrap! (get-bitcoin-tx-output? funding-tx funding-vout) ERR_PARSE))
+        (bond    (unwrap! (contract-call? POX5 get-protocol-bond bond-index) ERR_NO_BOND))
+        (unlock  (contract-call? POX5 get-bond-l1-unlock-height bond-index)))
+    ;; 1. open and inside the window
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
-    ;; 2. the bond has to be news. A lockup that predates the market is a
-    ;;    lookup, not a prediction, and the creator would already know it.
+    ;; 2. the lockup must postdate the market
     (asserts! (> lockup-burn-height (get created-at m)) ERR_BOND_TOO_EARLY)
-    ;; 3. both transactions are really on Bitcoin
-    (try! (tx-was-mined lockup-burn-height lockup-header lockup-txid lockup-tx-index lockup-path))
-    (try! (tx-was-mined funding-burn-height funding-header funding-txid funding-tx-index funding-path))
-    ;; 4. the bonded coins came from this wallet, and the lockup spent them
-    (let ((funded (try! (contract-call? .btc-parse get-output funding-tx funding-vout))))
-      (asserts! (is-eq (get script funded)
-                       (unwrap-panic (as-max-len? (get subject-script m) u128)))
-                ERR_WRONG_SCRIPT)
-      (asserts! (try! (contract-call? .btc-parse tx-spends-outpoint
-                                      lockup-tx funding-txid funding-vout))
-                ERR_NOT_SPENT)
-      ;; 5. they landed in a P2WSH bound to this staker, above the threshold
-      (let ((out (try! (contract-call? .btc-parse get-output lockup-tx lockup-vout))))
-        (try! (contract-call? .btc-parse verify-lockup
-                              (get script out) (get value out) witness-script
-                              staker commitment-offset (get threshold-sats m)))
-        ;; 6. and pox-5 agrees this staker holds a live native-L1 bond.
-        ;;    Which bond index is deliberately not checked: a staker holds one
-        ;;    membership at a time and a rollover rewrites the index, so pinning
-        ;;    it would break true outcomes later.
-        (let ((mem (unwrap! (contract-call? 'SP000000000000000000002Q6VF78.pox-5
-                                            get-bond-membership staker)
-                            ERR_NO_MEMBERSHIP)))
-          (asserts! (get is-l1-lock mem) ERR_NOT_L1)
-          (asserts! (>= (get amount-sats mem) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
-          (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
-          (print { event: "resolve", id: id, outcome: "bonded", staker: staker,
-                   sats: (get amount-sats mem), lockup-burn-height: lockup-burn-height })
-          (ok STATUS_BONDED))))))
+    ;; 3. both txs are on Bitcoin
+    (try! (tx-was-mined lockup-burn-height lockup-header (get txid lockup)
+                        lockup-tx-index lockup-tx-count lockup-path))
+    (try! (tx-was-mined funding-burn-height funding-header (get txid funded)
+                        funding-tx-index funding-tx-count funding-path))
+    ;; 4. the coins came from this wallet, and THIS wallet met the threshold.
+    ;;    without the amount check a 1-sat contribution alongside someone
+    ;;    else's coins would settle YES.
+    (asserts! (is-eq (get script funded) (get subject-script m)) ERR_WRONG_SCRIPT)
+    (asserts! (>= (get amount funded) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
+    (asserts! (try! (tx-spends-outpoint lockup-tx (get txid funded) funding-vout))
+              ERR_NOT_SPENT)
+    ;; 5. a real pox-5 lockup for this bond period
+    (asserts! (is-eq (get script lockup)
+                     (try! (contract-call? POX5 construct-lockup-output-script
+                              staker unlock staker-unlock-bytes
+                              (get early-unlock-bytes bond))))
+              ERR_NOT_A_LOCKUP)
+    (asserts! (>= (get amount lockup) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
+    ;; 6. pox-5 holds a live L1 bond for this staker at that index
+    (let ((mem (unwrap! (contract-call? POX5 get-bond-membership staker)
+                        ERR_NO_MEMBERSHIP)))
+      (asserts! (is-eq (get bond-index mem) bond-index) ERR_NO_MEMBERSHIP)
+      (asserts! (get is-l1-lock mem) ERR_NOT_L1)
+      (asserts! (>= (get amount-sats mem) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
+      (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
+      (print { event: "resolve", id: id, outcome: "bonded", staker: staker,
+               bond-index: bond-index, sats: (get amount-sats mem),
+               lockup-burn-height: lockup-burn-height })
+      (ok STATUS_BONDED))))
 
-;; No proof or permission needed: the window simply ran out.
 (define-public (resolve-idle (id uint))
   (let ((m (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET)))
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
@@ -450,7 +444,7 @@
     (asserts! (not (is-eq status STATUS_OPEN)) ERR_UNRESOLVED)
     (let ((payout (if (is-eq status STATUS_BONDED) (get bonded pos) (get idle pos))))
       (asserts! (> payout u0) ERR_NO_POSITION)
-      ;; Both sides burn; the loser's shares are worth nothing.
+      ;; both sides burn; the loser's shares pay nothing
       (map-set positions { id: id, who: who } { idle: u0, bonded: u0 })
       (map-set markets { id: id }
                (merge m { vault:       (- (get vault m) payout),
