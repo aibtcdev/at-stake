@@ -45,6 +45,9 @@
 (define-constant ERR_NO_BOND            (err u211))
 (define-constant ERR_UNLOCK_TOO_EARLY   (err u212))
 (define-constant ERR_WINDOW_TOO_LONG    (err u121))
+(define-constant ERR_NOT_A_SNAPSHOT    (err u122))
+(define-constant ERR_SNAPSHOT_TOO_LATE (err u123))
+(define-constant ERR_SNAPSHOT_EXISTS   (err u124))
 
 (define-constant MIN_FILL_BPS u100)
 
@@ -67,6 +70,8 @@
   })
 
 (define-map market-by-terms { terms: (buff 32) } { id: uint })
+
+(define-map snapshots { id: uint, txid: (buff 32), vout: uint } { sats: uint })
 
 (define-map positions
   { id: uint, who: principal }
@@ -190,6 +195,9 @@
 (define-read-only (get-next-market-id)
   (var-get next-market-id))
 
+(define-read-only (get-snapshot (id uint) (txid (buff 32)) (vout uint))
+  (map-get? snapshots { id: id, txid: txid, vout: vout }))
+
 (define-public (create-market
                  (title (string-ascii 64))
                  (subject-script (buff 34))
@@ -221,6 +229,8 @@
                 ERR_BAD_THRESHOLD)
       (var-set next-market-id (+ id u1))
       (map-set market-by-terms { terms: terms } { id: id })
+      (map-set snapshots { id: id, txid: (get txid out), vout: snap-vout }
+               { sats: (get amount out) })
       (map-set markets { id: id }
         { title: title, subject-script: subject-script, bond-index: bond-index,
           close-height: close-height,
@@ -231,6 +241,35 @@
                snapshot-sats: (get amount out), close-height: close-height,
                created-at: burn-block-height })
       (ok id))))
+
+;; Commit another of the wallet's coins to this market. Permissionless, and
+;; only for coins that already existed when the market opened.
+(define-public (add-snapshot
+                 (id uint)
+                 (snap-tx (buff 16384))
+                 (snap-vout uint)
+                 (burn-height uint)
+                 (header (buff 80))
+                 (tx-index uint)
+                 (tx-count uint)
+                 (merkle-path (list 14 (buff 32))))
+  (let ((m   (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
+        (out (unwrap! (get-bitcoin-tx-output? snap-tx snap-vout) ERR_PARSE)))
+    (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
+    ;; a coin mined after the question was asked is not part of the snapshot
+    (asserts! (<= burn-height (get created-at m)) ERR_SNAPSHOT_TOO_LATE)
+    (asserts! (is-none (map-get? snapshots { id: id, txid: (get txid out), vout: snap-vout }))
+              ERR_SNAPSHOT_EXISTS)
+    (try! (tx-was-mined burn-height header (get txid out) tx-index tx-count merkle-path))
+    (asserts! (is-eq (get script out) (get subject-script m)) ERR_WRONG_SCRIPT)
+    (asserts! (> (get amount out) u0) ERR_SNAPSHOT_TOO_SMALL)
+    (map-set snapshots { id: id, txid: (get txid out), vout: snap-vout }
+             { sats: (get amount out) })
+    (map-set markets { id: id }
+             (merge m { snapshot-sats: (+ (get snapshot-sats m) (get amount out)) }))
+    (print { event: "snapshot", id: id, txid: (get txid out), vout: snap-vout,
+             sats: (get amount out) })
+    (ok (get amount out))))
 
 (define-public (mint-complete-set (id uint) (sats uint))
   (let ((m   (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
@@ -410,7 +449,10 @@
                         lockup-tx-index lockup-tx-count lockup-path))
     (try! (tx-was-mined funding-burn-height funding-header (get txid funded)
                         funding-tx-index funding-tx-count funding-path))
-    ;; 4. the coins came from this wallet, and cleared the threshold on their own
+    ;; 4. the bonded coins are ones this market committed to at open
+    (asserts! (is-some (map-get? snapshots
+                { id: id, txid: (get txid funded), vout: funding-vout }))
+              ERR_NOT_A_SNAPSHOT)
     (asserts! (is-eq (get script funded) (get subject-script m)) ERR_WRONG_SCRIPT)
     (asserts! (>= (get amount funded) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
     (asserts! (try! (tx-spends-outpoint lockup-tx (get txid funded) funding-vout))
