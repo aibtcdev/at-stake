@@ -49,9 +49,6 @@
 (define-constant ERR_SNAPSHOT_TOO_LATE (err u123))
 (define-constant ERR_SNAPSHOT_EXISTS   (err u124))
 (define-constant ERR_SNAPSHOT_FROZEN   (err u125))
-(define-constant ERR_WRONG_STAKER      (err u126))
-(define-constant ERR_ALREADY_BONDED    (err u127))
-(define-constant ERR_NOT_YOUR_STAKER   (err u128))
 
 (define-constant MIN_FILL_BPS u100)
 
@@ -62,9 +59,6 @@
   {
     title:          (string-ascii 64),
     subject-script: (buff 34),
-    ;; who must do the bonding, when the creator knows. none = anyone's
-    ;; membership counts, which is weaker and has to be shown on the page.
-    staker:         (optional principal),
     bond-index:     uint,
     close-height:   uint,
     created-at:     uint,
@@ -186,13 +180,11 @@
               ERR_BAD_MERKLE)
     (ok true)))
 
-(define-read-only (terms-of (subject-script (buff 34)) (staker (optional principal))
-                            (bond-index uint)
+(define-read-only (terms-of (subject-script (buff 34)) (bond-index uint)
                             (close-height uint) (threshold-sats uint))
-  (sha256 (concat (concat subject-script (unwrap-panic (to-consensus-buff? staker)))
-                  (concat (unwrap-panic (to-consensus-buff? bond-index))
-                          (concat (unwrap-panic (to-consensus-buff? close-height))
-                                  (unwrap-panic (to-consensus-buff? threshold-sats)))))))
+  (sha256 (concat (concat subject-script (unwrap-panic (to-consensus-buff? bond-index)))
+                  (concat (unwrap-panic (to-consensus-buff? close-height))
+                          (unwrap-panic (to-consensus-buff? threshold-sats))))))
 
 (define-read-only (get-market (id uint))
   (map-get? markets { id: id }))
@@ -212,7 +204,6 @@
 (define-public (create-market
                  (title (string-ascii 64))
                  (subject-script (buff 34))
-                 (named-staker (optional principal))
                  (bond-index uint)
                  (close-height uint)
                  (threshold-sats uint)
@@ -224,7 +215,7 @@
                  (tx-count uint)
                  (merkle-path (list 14 (buff 32))))
   (let ((out   (unwrap! (get-bitcoin-tx-output? snap-tx snap-vout) ERR_PARSE))
-        (terms (terms-of subject-script named-staker bond-index close-height threshold-sats))
+        (terms (terms-of subject-script bond-index close-height threshold-sats))
         (id    (var-get next-market-id)))
     (asserts! (> (len title) u0) ERR_TITLE_EMPTY)
     (asserts! (is-none (map-get? market-by-terms { terms: terms })) ERR_EXISTS)
@@ -232,18 +223,6 @@
     ;; the window must close before this period's coins unlock
     (asserts! (< close-height (contract-call? POX5 get-bond-l1-unlock-height bond-index))
               ERR_WINDOW_TOO_LONG)
-    ;; you may only name yourself. Naming a stranger who will never bond is a
-    ;; market rigged to settle NO, with the creator on the other side of it.
-    (asserts! (match named-staker who (is-eq who contract-caller) true)
-              ERR_NOT_YOUR_STAKER)
-    ;; a named staker who already holds this period's membership makes the
-    ;; market a lookup, not a prediction
-    (asserts! (match named-staker
-                who (match (contract-call? POX5 get-bond-membership who)
-                      mem (not (is-eq (get bond-index mem) bond-index))
-                      true)
-                true)
-              ERR_ALREADY_BONDED)
     (try! (tx-was-mined burn-height header (get txid out) tx-index tx-count merkle-path))
     (begin
       (asserts! (is-eq (get script out) subject-script) ERR_WRONG_SCRIPT)
@@ -256,8 +235,7 @@
       (map-set snapshots { id: id, txid: (get txid out), vout: snap-vout }
                { sats: (get amount out) })
       (map-set markets { id: id }
-        { title: title, subject-script: subject-script, staker: named-staker,
-          bond-index: bond-index,
+        { title: title, subject-script: subject-script, bond-index: bond-index,
           close-height: close-height,
           created-at: burn-block-height, threshold-sats: threshold-sats,
           snapshot-sats: (get amount out), status: STATUS_OPEN,
@@ -491,10 +469,6 @@
     (let ((mem (unwrap! (contract-call? POX5 get-bond-membership staker)
                         ERR_NO_MEMBERSHIP)))
       (asserts! (is-eq (get bond-index mem) bidx) ERR_NO_MEMBERSHIP)
-      ;; if the market named who must bond, only their membership counts.
-      ;; Without this a stranger's live bond can be borrowed as proof.
-      (asserts! (match (get staker m) named (is-eq named staker) true)
-                ERR_WRONG_STAKER)
       (asserts! (get is-l1-lock mem) ERR_NOT_L1)
       (asserts! (>= (get amount-sats mem) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
       ;; a real lockup output is part of what pox-5 credited this staker, never

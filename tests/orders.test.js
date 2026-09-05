@@ -29,7 +29,7 @@ function key(account) {
 }
 
 const seed = () => simnet.callPublicFn(C, "test-seed-market", [
-  Cl.uint(ID), Cl.stringAscii("orders"), Cl.buffer(new Uint8Array(34).fill(1)), Cl.none(),
+  Cl.uint(ID), Cl.stringAscii("orders"), Cl.buffer(new Uint8Array(34).fill(1)),
   Cl.uint(1), Cl.uint(CLOSE), Cl.uint(0), Cl.uint(10_000), Cl.uint(150_000)], deployer);
 
 const pos = (who) => {

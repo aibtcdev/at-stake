@@ -18,7 +18,7 @@ function seedMarket() {
   return simnet.callPublicFn(C, "test-seed-market", [
     Cl.uint(ID),
     Cl.stringAscii("test market"),
-    Cl.buffer(new Uint8Array(34).fill(1)), Cl.none(),
+    Cl.buffer(new Uint8Array(34).fill(1)),
     Cl.uint(1),                 // bond-index
     Cl.uint(CLOSE),
     Cl.uint(0),                 // created-at
