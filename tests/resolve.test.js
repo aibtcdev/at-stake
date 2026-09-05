@@ -103,10 +103,11 @@ const SNAP_TXID = sha256d(snapTx);
 // create-market assigns the id itself and returns it. Terms are
 // (script, close-height, threshold), so distinct markets need distinct terms --
 // varying close-height is enough.
-function createMarketRaw(closeHeight, threshold = THRESHOLD, title = "will it bond") {
+function createMarketRaw(closeHeight, threshold = THRESHOLD, title = "will it bond",
+                         bondIndex = BOND_INDEX) {
   const b = inBlock(snapTx);
   return simnet.callPublicFn(C, "create-market", [
-    Cl.stringAscii(title), Cl.buffer(WALLET_SPK),
+    Cl.stringAscii(title), Cl.buffer(WALLET_SPK), Cl.uint(bondIndex),
     Cl.uint(closeHeight), Cl.uint(threshold),
     Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
     Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
@@ -161,11 +162,10 @@ function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight
                        opts = {}) {
   const f = fundingProof();
   const h = lockupHeight ?? simnet.burnBlockHeight;
-  const bondIndex = opts.bondIndex ?? BOND_INDEX;
   const unlock = opts.unlock ?? UNLOCK;
   const unlockBytes = opts.unlockBytes ?? STAKER_UNLOCK_BYTES;
   return simnet.callPublicFn(C, "resolve-bonded", [
-    Cl.uint(id), Cl.uint(bondIndex), Cl.principal(stakerPrincipal),
+    Cl.uint(id), Cl.principal(stakerPrincipal),
     Cl.uint(unlock), Cl.buffer(unlockBytes),
     Cl.buffer(lk.tx), Cl.uint(0),
     Cl.uint(h), Cl.buffer(lk.block.header), Cl.uint(lk.block.index),
@@ -235,7 +235,7 @@ describe("create-market: proving the snapshot on chain", () => {
     });
     const b = inBlock(small);
     const r = simnet.callPublicFn(C, "create-market", [
-      Cl.stringAscii("zero value"), Cl.buffer(WALLET_SPK), Cl.uint(710),
+      Cl.stringAscii("zero value"), Cl.buffer(WALLET_SPK), Cl.uint(BOND_INDEX), Cl.uint(710),
       Cl.uint(THRESHOLD), Cl.buffer(small), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
       Cl.list(b.path.map((x) => Cl.buffer(x))),
@@ -247,7 +247,7 @@ describe("create-market: proving the snapshot on chain", () => {
     const b = inBlock(snapTx);
     const r = simnet.callPublicFn(C, "create-market", [
       Cl.stringAscii("wrong wallet"), Cl.buffer(p2wpkh(Buffer.alloc(20, 0x99))),
-      Cl.uint(711), Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
+      Cl.uint(BOND_INDEX), Cl.uint(711), Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
       Cl.list(b.path.map((x) => Cl.buffer(x))),
     ], alice);
@@ -258,7 +258,7 @@ describe("create-market: proving the snapshot on chain", () => {
     const b = inBlock(snapTx);
     const badPath = b.path.map(() => sha256d(Buffer.from("nope")));
     const r = simnet.callPublicFn(C, "create-market", [
-      Cl.stringAscii("forged proof"), Cl.buffer(WALLET_SPK), Cl.uint(712),
+      Cl.stringAscii("forged proof"), Cl.buffer(WALLET_SPK), Cl.uint(BOND_INDEX), Cl.uint(712),
       Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
       Cl.list(badPath.map((x) => Cl.buffer(x))),
@@ -268,6 +268,22 @@ describe("create-market: proving the snapshot on chain", () => {
 
   // The id is assigned, so duplicates are caught by the terms hash instead:
   // same wallet, same deadline, same threshold is the same question.
+  it("REJECTS a deadline past the point this period's coins unlock", () => {
+    // The window has to close while the bond is still provable. pox-5 computes
+    // that height; nothing here is allowed to guess it.
+    const tooLate = minUnlockHeight(deployer, BOND_INDEX) + 1;
+    expect(createMarketRaw(tooLate, THRESHOLD, "too late").result).toBeErr(Cl.uint(121));
+  });
+
+  it("treats the same wallet in a different bond period as a different market", () => {
+    // One market per wallet per bond window: the index is part of the terms,
+    // so this is not a duplicate even though everything else matches.
+    const a = createMarketRaw(730, THRESHOLD, "period 1", 1);
+    const b = createMarketRaw(730, THRESHOLD, "period 2", 2);
+    expect(a.result.type).toBe("ok");
+    expect(b.result.type).toBe("ok");
+  });
+
   it("REJECTS a second market with identical terms", () => {
     createMarketRaw(720);
     expect(createMarketRaw(720).result).toBeErr(Cl.uint(100));
@@ -362,6 +378,22 @@ describe("resolve-bonded: the full YES claim", () => {
 
   // Same shape, right template, wrong period: the unlock height is what
   // separates one bond window from the next.
+  // resolve-bonded reads bond-index from the market, so a caller cannot name a
+  // different period than the one the market is about.
+  //
+  // This covers the unconfigured-period case. The other branch -- a live bond
+  // in period N settling a market about period M -- is not reachable in simnet:
+  // pox-5's setup-bond only accepts the index whose start falls in the next two
+  // reward cycles, so two periods cannot be live at once. It is guarded by
+  // (is-eq (get bond-index mem) bidx) in check 6.
+  it("REJECTS a market whose bond period pox-5 does not know", () => {
+    const r = createMarketRaw(740, THRESHOLD, "other period", BOND_INDEX + 1);
+    const id = Number(r.result.value.value);
+    simnet.mineEmptyBurnBlocks(1);
+    const lk = setBond(true, SNAP_SATS);
+    expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(211));
+  });
+
   it("REJECTS a real pox-5 lockup built for a later unlock height", () => {
     const { id } = createMarket();
     const lk = setBond(true, SNAP_SATS);

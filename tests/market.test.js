@@ -19,6 +19,7 @@ function seedMarket() {
     Cl.uint(ID),
     Cl.stringAscii("test market"),
     Cl.buffer(new Uint8Array(34).fill(1)),
+    Cl.uint(1),                 // bond-index
     Cl.uint(CLOSE),
     Cl.uint(0),                 // created-at
     Cl.uint(100_000_000),
