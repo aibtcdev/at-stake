@@ -25,11 +25,6 @@ contract_id = "SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token"
 # it points at mainnet sBTC, which simnet cannot see. `build-sim.sh` derives
 # `at-stake-sim.clar` from it by swapping in the testnet sBTC. See CLAUDE.md.
 
-[contracts.btc-parse]
-path = "contracts/btc-parse.clar"
-clarity_version = 6
-epoch = "4.0"
-
 [contracts.pox5-sim]
 path = "contracts/pox5-sim.clar"
 clarity_version = 6
