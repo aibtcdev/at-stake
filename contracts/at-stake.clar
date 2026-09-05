@@ -31,6 +31,10 @@
 (define-constant ERR_NOT_L1             (err u207))
 (define-constant ERR_BELOW_THRESHOLD    (err u209))
 (define-constant ERR_BOND_TOO_EARLY     (err u210))
+(define-constant ERR_BAD_SIG            (err u113))
+(define-constant ERR_ORDER_EXPIRED      (err u114))
+(define-constant ERR_ORDER_FILLED       (err u115))
+(define-constant ERR_ORDER_CANCELLED    (err u116))
 
 ;; Markets are numbered, so a UI can say "#7" instead of a hash.
 (define-data-var next-market-id uint u1)
@@ -56,6 +60,14 @@
 (define-map positions
   { id: uint, who: principal }
   { idle: uint, bonded: uint })
+
+;; Signed orders are one-shot. Filling one records its hash so it cannot be
+;; replayed against the seller.
+(define-map filled-orders { hash: (buff 32) } { filled-by: principal })
+
+;; A seller's nonce floor. Orders signed below it are dead, so one transaction
+;; revokes every outstanding offer without having to name them.
+(define-map order-floor { seller: principal } { min-nonce: uint })
 
 ;; Bitcoin block hashes are reported reversed; merkle math is internal order.
 (define-private (reverse-buff16 (input (buff 16)))
@@ -181,6 +193,7 @@
                         bonded-circ: (+ (get bonded-circ m) sats) }))
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
                           transfer sats tx-sender current-contract none))
+    (print { event: "mint", id: id, sats: sats, who: tx-sender })
     (ok sats)))
 
 (define-public (merge-complete-set (id uint) (sats uint))
@@ -200,6 +213,7 @@
             ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sats))
             (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
                                   transfer sats current-contract who none))))
+    (print { event: "merge", id: id, sats: sats, who: who })
     (ok sats)))
 
 (define-public (transfer-shares (id uint) (side uint) (amount uint) (to principal))
@@ -221,6 +235,81 @@
           (map-set positions { id: id, who: from } (merge src { bonded: (- (get bonded src) amount) }))
           (map-set positions { id: id, who: to }   (merge dst { bonded: (+ (get bonded dst) amount) }))))
     (print { event: "transfer", id: id, side: side, amount: amount, from: from, to: to })
+    (ok amount)))
+
+;; What a seller signs. Nothing here is secret: the buyer needs every field to
+;; reconstruct the hash, and the signature is what makes it binding.
+;; `contract` is a domain separator. Without it a signature is equally valid on
+;; any other deployment carrying this function, so an old order could be
+;; replayed against a fork or a later version to take shares at a stale price.
+(define-read-only (order-hash
+                    (id uint) (side uint) (amount uint)
+                    (price-sats uint) (nonce uint) (expiry uint))
+  (sha256 (unwrap-panic (to-consensus-buff?
+    { contract: current-contract, market: id, side: side, amount: amount,
+      price: price-sats, nonce: nonce, expiry: expiry }))))
+
+(define-read-only (get-order-floor (seller principal))
+  (default-to u0 (get min-nonce (map-get? order-floor { seller: seller }))))
+
+;; Revoke every order signed with a nonce below `min-nonce`. Cheaper and more
+;; reliable than cancelling offers one at a time, and it cannot be front-run
+;; into a partial state: either the floor moves or it does not.
+(define-public (cancel-orders-below (min-nonce uint))
+  (begin
+    (asserts! (> min-nonce (get-order-floor tx-sender)) ERR_ZERO)
+    (map-set order-floor { seller: tx-sender } { min-nonce: min-nonce })
+    (print { event: "cancel", seller: tx-sender, min-nonce: min-nonce })
+    (ok min-nonce)))
+
+(define-read-only (order-filled (hash (buff 32)))
+  (map-get? filled-orders { hash: hash }))
+
+;; Settle an off-chain order on chain, both legs or neither.
+;;
+;; transfer-shares alone cannot be used to trade with a stranger: it moves
+;; shares and nothing else, so somebody has to go first and hope. Here the
+;; shares and the sBTC move in one transaction, and the price lands in an event
+;; where an indexer can see it -- the contract otherwise has no idea what
+;; anything sold for.
+;;
+;; The book itself stays off chain. This only settles what it matched.
+(define-public (fill-order
+                 (id uint) (side uint) (amount uint) (price-sats uint)
+                 (nonce uint) (expiry uint)
+                 (seller principal) (signature (buff 65)))
+  (let ((m     (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
+        (hash  (order-hash id side amount price-sats nonce expiry))
+        (buyer tx-sender)
+        (src   (get-position id seller))
+        (dst   (get-position id tx-sender)))
+    (asserts! (> amount u0) ERR_ZERO)
+    (asserts! (not (is-eq seller buyer)) ERR_SELF_TRANSFER)
+    (asserts! (or (is-eq side SIDE_IDLE) (is-eq side SIDE_BONDED)) ERR_BAD_SIDE)
+    (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
+    (asserts! (<= burn-block-height expiry) ERR_ORDER_EXPIRED)
+    (asserts! (>= nonce (get-order-floor seller)) ERR_ORDER_CANCELLED)
+    (asserts! (is-none (map-get? filled-orders { hash: hash })) ERR_ORDER_FILLED)
+    ;; the order is only an order if the seller actually signed it
+    (asserts! (is-eq (unwrap! (principal-of? (unwrap! (secp256k1-recover? hash signature)
+                                                      ERR_BAD_SIG))
+                              ERR_BAD_SIG)
+                     seller)
+              ERR_BAD_SIG)
+    (map-set filled-orders { hash: hash } { filled-by: buyer })
+    (if (is-eq side SIDE_IDLE)
+        (begin
+          (asserts! (>= (get idle src) amount) ERR_NO_POSITION)
+          (map-set positions { id: id, who: seller } (merge src { idle: (- (get idle src) amount) }))
+          (map-set positions { id: id, who: buyer }  (merge dst { idle: (+ (get idle dst) amount) })))
+        (begin
+          (asserts! (>= (get bonded src) amount) ERR_NO_POSITION)
+          (map-set positions { id: id, who: seller } (merge src { bonded: (- (get bonded src) amount) }))
+          (map-set positions { id: id, who: buyer }  (merge dst { bonded: (+ (get bonded dst) amount) }))))
+    (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+                          transfer price-sats buyer seller none))
+    (print { event: "fill", id: id, side: side, amount: amount,
+             price-sats: price-sats, seller: seller, buyer: buyer, hash: hash })
     (ok amount)))
 
 ;; The YES claim. The caller brings evidence and asserts nothing.
