@@ -52,3 +52,8 @@ passes = ["check_checker"]
 # The Bitcoin parsers take untrusted buffers by design and validate them
 # internally, so let the checker follow the value into the callee.
 check_checker = { trusted_sender = false, trusted_caller = false, callee_filter = true }
+
+[contracts.test-hostile-relay]
+path = "contracts/test-hostile-relay.clar"
+clarity_version = 6
+epoch = "4.0"
