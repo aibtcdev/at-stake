@@ -126,12 +126,30 @@ until something proves otherwise.**
 first market we ever settled YES was one whose answer already existed. Fixed by
 `created-at` in v3.
 
+## The order layer (local, not deployed)
+
+`fill-order` settles a signed off-chain order atomically. Things that are easy
+to get wrong and were:
+
+- **The hash must include the seller.** It is the order's identity as well as
+  the thing signed. Without the seller, two people signing identical terms share
+  a fill counter and one kills the other.
+- **The hash must include the contract.** Otherwise a signature is valid on any
+  fork carrying the same function.
+- **`fill-price` rounds up.** Floor division makes a 1-share fill of a
+  1000-share order cost zero, so it can be drained a share at a time.
+- **Trading must stop at `close-height`, not merely at resolution.** A market
+  past its deadline is still OPEN until somebody calls `resolve-idle`, and the
+  outcome in that gap is already certain.
+
+The deployed v3 lacks that last check in `transfer-shares` and cannot be fixed.
+
 ## Known gaps, in priority order
 
-1. **No AMM.** Trading is OTC via `transfer-shares`. This is the real reason
-   there is no market yet. Polymarket and Kalshi both use a CLOB rather than an
-   AMM, and the complete-set identity (1 YES + 1 NO = 1 sat) lets an order book
-   mirror opposite-side orders to double depth. That is the shape to copy.
+1. ~~**No AMM.**~~ Being addressed by the order layer above, off-chain book plus
+   on-chain settlement. An AMM is still the wrong shape: LPs get run over as one
+   side goes to zero near resolution, which is why Polymarket and Kalshi both
+   use order books.
 2. **`close-height` is not tied to the bond's start.** `get-bond-membership`
    returns none once the unlock cycle is reached, so a true L1 lock can become
    unprovable before anyone settles.

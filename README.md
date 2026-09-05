@@ -139,6 +139,48 @@ reason.
 - `scripts/spv/` — build SPV proofs from a Bitcoin node or mempool.space
 - `scripts/deploy/` — mainnet deploys with an explicit Clarity version
 
+## Trading (not yet deployed)
+
+`transfer-shares` moves shares and no money, so trading with a stranger means
+one side going first and hoping. The order layer fixes that:
+
+| function | what it does |
+|---|---|
+| `order-hash` | the digest a seller signs: contract, seller, market, side, amount, price, nonce, expiry |
+| `fill-order` | settles a signed order — shares one way, sBTC the other, both or neither |
+| `cancel-orders-below` | moves a per-seller nonce floor, revoking every older order in one call |
+| `fill-price` | what a slice costs, rounded up |
+| `order-filled` | how much of an order has gone |
+
+The book itself stays off chain, which is how Polymarket works too: match in a
+backend, settle on chain. The `fill` event carries the price, which is the only
+way one reaches an indexer — the contract has no other notion of what anything
+sold for.
+
+Orders fill partially. Two guards come with that:
+
+**Rounding favours the seller.** Floor division makes one share of a 1,000-share
+order at 680 sats cost `680 * 1 / 1000 = 0`, so an order could be taken apart
+for free a share at a time. `fill-price` rounds up.
+
+**A fill must be at least 1% of the order**, or clear the remainder exactly.
+Without a floor an order can be chewed away one share at a time, each nibble
+costing a state write. The remainder exception stops order tails being stranded.
+
+### Two bugs the audit caught here
+
+The order hash originally left out the seller. It is both the thing signed and
+the order's identity, and as an identity it was wrong: two sellers signing the
+same terms produced the same hash and shared a fill counter, so filling one
+marked the other spent.
+
+`transfer-shares` and `fill-order` checked only that a market was OPEN, not that
+it was inside its window. A market past `close-height` stays OPEN until somebody
+calls `resolve-idle`, and in that gap the outcome is certain — buying off a
+stale order there and resolving it yourself was free money. **The deployed v3
+still has this in `transfer-shares`;** it is immutable, so v3 should not carry
+real users.
+
 ## Known gaps
 
 1. **No AMM.** Trading is OTC via `transfer-shares`, which is the real reason
