@@ -5,8 +5,9 @@
 // bond-admin. Nothing here fakes membership: every row these helpers produce is
 // written by pox-5 itself, through grant-signer-key -> register-signer ->
 // setup-bond -> register-for-bond.
-import { Cl, signMessageHashRsv, privateKeyToPublic, publicKeyToHex } from "@stacks/transactions";
+import { Cl, serializeCV, signMessageHashRsv, privateKeyToPublic, publicKeyToHex } from "@stacks/transactions";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 export const POX = "pox5-sim";
 export const SIGNER_MANAGER = "test-signer-manager";
@@ -66,15 +67,13 @@ export const minUnlockHeight = (deployer, bondIndex) =>
 
 // pox-5's own lockup script for a staker. This is the template At Stake's
 // check 4 has to recognise, so tests pay the real thing rather than a lookalike.
-// The commitment's offset moves with the unlock height, because pox-5 pushes
-// it after a variable-length CLTV script number. So locate it rather than
-// assume a constant.
-export function commitmentOffset(deployer, witness, staker) {
-  const c = simnet.callReadOnlyFn("btc-parse", "staker-commitment",
-    [Cl.principal(staker)], deployer).result.value.value;
-  const at = witness.indexOf(Buffer.from(c, "hex"));
-  if (at < 0) throw new Error("staker commitment not present in lockup script");
-  return at;
+// sha256d(to-consensus-buff? staker) -- the commitment pox-5 embeds in the
+// lockup script. Computed here rather than read from a contract, so a test can
+// assert the script really binds the staker it names.
+export function stakerCommitment(staker) {
+  const b = Buffer.from(serializeCV(Cl.principal(staker)), "hex");
+  return createHash("sha256").update(
+    createHash("sha256").update(b).digest()).digest();
 }
 
 export function lockupScriptFor(deployer, staker, unlockHeight) {
@@ -85,7 +84,7 @@ export function lockupScriptFor(deployer, staker, unlockHeight) {
     [Cl.principal(staker), Cl.uint(unlockHeight), Cl.buffer(STAKER_UNLOCK_BYTES),
      Cl.buffer(EARLY_UNLOCK_BYTES)], deployer).result.value.value;
   const w = hex(witness);
-  return { witness: w, spk: hex(spk), offset: commitmentOffset(deployer, w, staker) };
+  return { witness: w, spk: hex(spk) };
 }
 
 // Register an L1 (native BTC timelock) bond. `proof` is a single-transaction
