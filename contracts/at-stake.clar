@@ -1,9 +1,3 @@
-;; At Stake: did these coins enter a Stacks protocol bond before burn height H?
-;;
-;; Early exit: YES is terminal. The market asks whether the coins ENTERED a
-;; bond, not whether they stayed, so a staker exiting later does not reopen it.
-;; Exit before anyone proves YES and the window closes NO.
-
 (define-constant MIN_SNAPSHOT_SATS u1)
 
 (define-constant MIN_WINDOW_BLOCKS u144)
@@ -408,16 +402,12 @@
                         lockup-tx-index lockup-tx-count lockup-path))
     (try! (tx-was-mined funding-burn-height funding-header (get txid funded)
                         funding-tx-index funding-tx-count funding-path))
-    ;; 4. the coins came from this wallet, and THIS wallet met the threshold.
-    ;;    without the amount check a 1-sat contribution alongside someone
-    ;;    else's coins would settle YES.
+    ;; 4. the coins came from this wallet, and cleared the threshold on their own
     (asserts! (is-eq (get script funded) (get subject-script m)) ERR_WRONG_SCRIPT)
     (asserts! (>= (get amount funded) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
     (asserts! (try! (tx-spends-outpoint lockup-tx (get txid funded) funding-vout))
               ERR_NOT_SPENT)
-    ;; 5. a real pox-5 lockup for this bond period
-    ;;    pox-5 treats the period's unlock height as a floor, not an exact
-    ;;    value: a staker may lock for longer. Mirror that or valid bonds fail.
+    ;; 5. a real pox-5 lockup for this period; the unlock height is a floor
     (asserts! (>= unlock-burn-height floor) ERR_UNLOCK_TOO_EARLY)
     (asserts! (is-eq (get script lockup)
                      (try! (contract-call? POX5 construct-lockup-output-script
