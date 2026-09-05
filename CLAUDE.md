@@ -17,7 +17,8 @@ protocol bond before burn height H, or stay idle?**
 | contract | status |
 |---|---|
 | `SP5Y3W3F78NKFH4HYFNDQMJC484VZWKDH35ZR2M9.btc-parse` | current, unchanged since v1 |
-| `SP5Y3W3F78NKFH4HYFNDQMJC484VZWKDH35ZR2M9.at-stake-v3` | **current** |
+| `SP5Y3W3F78NKFH4HYFNDQMJC484VZWKDH35ZR2M9.at-stake-v4` | **current** — adds the order layer, closes the deadline gap |
+| `…at-stake-v3` | superseded: trading stays open past `close-height` |
 | `…at-stake-v2` | superseded: front-running hole, one-UTXO linkage |
 | `…at-stake` (v1) | **inert** — header byte order was wrong, verifies nothing |
 
@@ -82,7 +83,7 @@ loosening the match.
 
 | file | role | deployed? |
 |---|---|---|
-| `at-stake.clar` | market, escrow, both resolvers | yes, as `at-stake-v3` |
+| `at-stake.clar` | market, escrow, both resolvers | yes, as `at-stake-v4` |
 | `btc-parse.clar` | Bitcoin tx parsing, P2WSH lockup checks | yes |
 | `pox5-sim.clar` | the REAL pox-5, ours so we hold bond-admin | no, simnet only |
 | `test-signer-manager.clar` | `signer-manager-trait` impl | no, simnet only |
@@ -126,7 +127,7 @@ until something proves otherwise.**
 first market we ever settled YES was one whose answer already existed. Fixed by
 `created-at` in v3.
 
-## The order layer (local, not deployed)
+## The order layer
 
 `fill-order` settles a signed off-chain order atomically. Things that are easy
 to get wrong and were:
@@ -143,6 +144,7 @@ to get wrong and were:
   outcome in that gap is already certain.
 
 The deployed v3 lacks that last check in `transfer-shares` and cannot be fixed.
+That is what v4 exists for.
 
 ## Known gaps, in priority order
 
