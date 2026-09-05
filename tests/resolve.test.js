@@ -3,7 +3,8 @@ import { Cl } from "@stacks/transactions";
 import { createHash } from "node:crypto";
 import {
   registerSigner, setupBond, currentBondIndex, minUnlockHeight,
-  lockupScriptFor, registerL1Bond, registerSbtcBond,
+  lockupScriptFor, registerL1Bond, registerSbtcBond, STAKER_UNLOCK_BYTES,
+  stakerCommitment,
 } from "./helpers/pox5.js";
 
 const deployer = simnet.getAccounts().get("deployer");
@@ -62,7 +63,7 @@ function inBlock(txBuf) {
   // bits, nonce. Only the root matters to the contract.
   const header = Buffer.alloc(80, 0xab);
   root.copy(header, 36);
-  return { txid, index: 2, path: proofFor(levels, 2), header };
+  return { txid, index: 2, count: leaves.length, path: proofFor(levels, 2), header };
 }
 
 // A block containing exactly one transaction. Its merkle root is the txid, so
@@ -73,14 +74,9 @@ function inSoloBlock(txBuf) {
   const txid = sha256d(txBuf);
   const header = Buffer.alloc(80, 0xab);
   txid.copy(header, 36);
-  return { txid, index: 0, path: [], header };
+  return { txid, index: 0, count: 1, path: [], header };
 }
 
-
-function stakerCommitment(principalStr) {
-  const r = simnet.callReadOnlyFn("btc-parse", "staker-commitment", [Cl.principal(principalStr)], deployer);
-  return Buffer.from(r.result.value.value, "hex");
-}
 
 const WALLET_SPK = p2wpkh(Buffer.alloc(20, 0x42)); // the subject wallet
 const SNAP_PREV = sha256d(Buffer.from("older utxo"));
@@ -113,7 +109,8 @@ function createMarketRaw(closeHeight, threshold = THRESHOLD, title = "will it bo
     Cl.stringAscii(title), Cl.buffer(WALLET_SPK),
     Cl.uint(closeHeight), Cl.uint(threshold),
     Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
-    Cl.buffer(b.header), Cl.uint(b.index), Cl.list(b.path.map((x) => Cl.buffer(x))),
+    Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
+    Cl.list(b.path.map((x) => Cl.buffer(x))),
   ], alice);
 }
 
@@ -141,7 +138,7 @@ function bondSetup() {
 // One transaction, verified independently by both contracts -- pox-5 accepts it
 // as a timelock, at-stake sees it spend the committed coins.
 function buildLockup(sats = SNAP_SATS, stakerPrincipal = staker, prevTxid = SNAP_TXID) {
-  const { witness, spk, offset } = lockupScriptFor(deployer, stakerPrincipal, UNLOCK);
+  const { witness, spk } = lockupScriptFor(deployer, stakerPrincipal, UNLOCK);
   const tx = ser({
     inputs: [{ txid: prevTxid, vout: 0, script: Buffer.alloc(0) }],
     outputs: [
@@ -149,7 +146,7 @@ function buildLockup(sats = SNAP_SATS, stakerPrincipal = staker, prevTxid = SNAP
       { value: 12_000, script: p2wpkh(Buffer.alloc(20, 7)) },
     ],
   });
-  return { tx, script: witness, offset, block: inSoloBlock(tx) };
+  return { tx, script: witness, block: inSoloBlock(tx) };
 }
 
 // The funding proof: snapTx pays WALLET_SPK at output 0, and the lockup spends
@@ -160,18 +157,22 @@ function fundingProof() {
   return { tx: snapTx, vout: 0, block: b };
 }
 
-function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight = null) {
+function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight = null,
+                       opts = {}) {
   const f = fundingProof();
   const h = lockupHeight ?? simnet.burnBlockHeight;
+  const bondIndex = opts.bondIndex ?? BOND_INDEX;
+  const unlock = opts.unlock ?? UNLOCK;
+  const unlockBytes = opts.unlockBytes ?? STAKER_UNLOCK_BYTES;
   return simnet.callPublicFn(C, "resolve-bonded", [
-    Cl.uint(id), Cl.principal(stakerPrincipal),
+    Cl.uint(id), Cl.uint(bondIndex), Cl.principal(stakerPrincipal),
+    Cl.uint(unlock), Cl.buffer(unlockBytes),
     Cl.buffer(lk.tx), Cl.uint(0),
     Cl.uint(h), Cl.buffer(lk.block.header), Cl.uint(lk.block.index),
-    Cl.list(lk.block.path.map((x) => Cl.buffer(x))),
-    Cl.buffer(lk.script), Cl.uint(lk.offset),
+    Cl.uint(lk.block.count), Cl.list(lk.block.path.map((x) => Cl.buffer(x))),
     Cl.buffer(f.tx), Cl.uint(f.vout),
     Cl.uint(1), Cl.buffer(f.block.header), Cl.uint(f.block.index),
-    Cl.list(f.block.path.map((x) => Cl.buffer(x))),
+    Cl.uint(f.block.count), Cl.list(f.block.path.map((x) => Cl.buffer(x))),
   ], who);
 }
 
@@ -236,7 +237,8 @@ describe("create-market: proving the snapshot on chain", () => {
     const r = simnet.callPublicFn(C, "create-market", [
       Cl.stringAscii("zero value"), Cl.buffer(WALLET_SPK), Cl.uint(710),
       Cl.uint(THRESHOLD), Cl.buffer(small), Cl.uint(0), Cl.uint(1),
-      Cl.buffer(b.header), Cl.uint(b.index), Cl.list(b.path.map((x) => Cl.buffer(x))),
+      Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
+      Cl.list(b.path.map((x) => Cl.buffer(x))),
     ], alice);
     expect(r.result).toBeErr(Cl.uint(203));
   });
@@ -246,7 +248,8 @@ describe("create-market: proving the snapshot on chain", () => {
     const r = simnet.callPublicFn(C, "create-market", [
       Cl.stringAscii("wrong wallet"), Cl.buffer(p2wpkh(Buffer.alloc(20, 0x99))),
       Cl.uint(711), Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
-      Cl.buffer(b.header), Cl.uint(b.index), Cl.list(b.path.map((x) => Cl.buffer(x))),
+      Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
+      Cl.list(b.path.map((x) => Cl.buffer(x))),
     ], alice);
     expect(r.result).toBeErr(Cl.uint(204));
   });
@@ -257,7 +260,8 @@ describe("create-market: proving the snapshot on chain", () => {
     const r = simnet.callPublicFn(C, "create-market", [
       Cl.stringAscii("forged proof"), Cl.buffer(WALLET_SPK), Cl.uint(712),
       Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
-      Cl.buffer(b.header), Cl.uint(b.index), Cl.list(badPath.map((x) => Cl.buffer(x))),
+      Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
+      Cl.list(badPath.map((x) => Cl.buffer(x))),
     ], alice);
     expect(r.result).toBeErr(Cl.uint(201));
   });
@@ -320,7 +324,7 @@ describe("resolve-bonded: the full YES claim", () => {
       inputs: [{ txid: sha256d(Buffer.from("someone else's coins")), vout: 0, script: Buffer.alloc(0) }],
       outputs: [{ value: SNAP_SATS, script: spk }],
     });
-    const lk = { tx: unrelated, script: witness, offset, block: inSoloBlock(unrelated) };
+    const lk = { tx: unrelated, script: witness, block: inSoloBlock(unrelated) };
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(205));
   });
 
@@ -333,15 +337,36 @@ describe("resolve-bonded: the full YES claim", () => {
       inputs: [{ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) }],
       outputs: [{ value: SNAP_SATS, script: spk }],
     });
-    const lk = { tx, script: witness, offset, block: inSoloBlock(tx) };
+    const lk = { tx, script: witness, block: inSoloBlock(tx) };
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(313));
   });
 
-  it("REJECTS a witness script that does not hash to the output", () => {
+  // The forgery that v4 accepted. The witness script is no longer a parameter:
+  // pox-5 builds the script from the staker and the bond period, and the lockup
+  // output must equal its P2WSH byte for byte. A P2WSH that merely carries the
+  // commitment -- no OP_IF, no CLTV, sweepable the next block -- cannot settle.
+  it("REJECTS a forged P2WSH that only carries the staker commitment", () => {
+    const { id } = createMarket();
+    setBond(true, SNAP_SATS);
+    const forged = Buffer.concat([
+      Buffer.from([0x20]), stakerCommitment(staker), Buffer.from([0x75]),
+      Buffer.from([0x21]), Buffer.alloc(33, 0x02), Buffer.from([0xac]),
+    ]);
+    const tx = ser({
+      inputs: [{ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) }],
+      outputs: [{ value: SNAP_SATS, script: p2wsh(forged) }],
+    });
+    const lk = { tx, script: forged, block: inSoloBlock(tx) };
+    expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(313));
+  });
+
+  // Same shape, right template, wrong period: the unlock height is what
+  // separates one bond window from the next.
+  it("REJECTS a real pox-5 lockup built for a later unlock height", () => {
     const { id } = createMarket();
     const lk = setBond(true, SNAP_SATS);
-    lk.script = Buffer.concat([lk.script, Buffer.from([0x51])]); // one byte off
-    expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(310));
+    expect(resolveBonded(id, lk, bob, staker, null, { unlock: UNLOCK + 1000 }).result)
+      .toBeErr(Cl.uint(313));
   });
 
   it("REJECTS resolving after the window closed", () => {
