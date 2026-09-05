@@ -29,6 +29,9 @@ cat >> contracts/at-stake-sim.clar <<'SIM'
         vault: u0, idle-circ: u0, bonded-circ: u0 })
     (ok true)))
 
+(define-read-only (test-tx-output (tx (buff 16384)) (index uint))
+  (get-bitcoin-tx-output? tx index))
+
 (define-public (test-set-bonded (id uint))
   (let ((m (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET)))
     (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
