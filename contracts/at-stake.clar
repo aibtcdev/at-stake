@@ -51,6 +51,7 @@
 (define-constant ERR_SNAPSHOT_FROZEN   (err u125))
 (define-constant ERR_WRONG_STAKER      (err u126))
 (define-constant ERR_ALREADY_BONDED    (err u127))
+(define-constant ERR_NOT_YOUR_STAKER   (err u128))
 
 (define-constant MIN_FILL_BPS u100)
 
@@ -231,6 +232,10 @@
     ;; the window must close before this period's coins unlock
     (asserts! (< close-height (contract-call? POX5 get-bond-l1-unlock-height bond-index))
               ERR_WINDOW_TOO_LONG)
+    ;; you may only name yourself. Naming a stranger who will never bond is a
+    ;; market rigged to settle NO, with the creator on the other side of it.
+    (asserts! (match named-staker who (is-eq who contract-caller) true)
+              ERR_NOT_YOUR_STAKER)
     ;; a named staker who already holds this period's membership makes the
     ;; market a lookup, not a prediction
     (asserts! (match named-staker
