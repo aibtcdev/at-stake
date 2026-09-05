@@ -169,7 +169,7 @@ Measured 5 Sep 2026 against a 5e9 runtime block limit, `vitest run -- --costs`.
 
 | call | runtime | % of a block |
 |---|---|---|
-| `resolve-bonded` (full YES) | 1,984,168 | 0.040% |
+| `resolve-bonded` (full YES) | 1,310,207 | 0.026% |
 | `tx-spends-outpoint`, 50 inputs | 4,036,683 | 0.081% |
 | `tx-spends-outpoint`, 1 input | 188,145 | 0.004% |
 | `create-market` | 843,212 | 0.017% |
@@ -177,11 +177,14 @@ Measured 5 Sep 2026 against a 5e9 runtime block limit, `vitest run -- --costs`.
 | `fill-order` | 54,291 | 0.001% |
 | mint / merge / redeem | ~44,000 | 0.001% |
 
-2,519 full resolves fit in one block. Worst read count is 53 against a 15,000
+3,816 full resolves fit in one block. Worst read count is 53 against a 15,000
 limit; worst write count is 4.
 
-Delegating to the builtins and pox-5 made a resolve *cheaper* than the
-hand-rolled v2 (0.038% vs 0.042%) despite a 4x larger transaction buffer.
+Delegating to the builtins and pox-5 made a resolve cheaper than the hand-rolled
+v2 (0.042%) despite a 4x larger transaction buffer. Dropping the funding SPV
+proof took another 674,000 off: once the outpoint has to be in `snapshots`, and
+every entry there was proven when committed, re-proving it at settle time
+verifies nothing.
 
 `MAX_INPUTS` is a real cost lever, not a free ceiling: `fold` walks the whole
 index list whatever the transaction holds, so each unused slot costs ~3,000.
