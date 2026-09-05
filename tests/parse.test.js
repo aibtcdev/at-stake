@@ -2,11 +2,21 @@ import { describe, it, expect } from "vitest";
 import { Cl } from "@stacks/transactions";
 import { createHash } from "node:crypto";
 
-const deployer = simnet.getAccounts().get("deployer");
-const P = "btc-parse";
+// Input parsing is the only Bitcoin code left in at-stake. Reading an output is
+// a Clarity builtin now, so what still needs proving is OUR half: that
+// tx-spends-outpoint walks inputs correctly, and that the txid it compares
+// against is in the same byte order the builtin reports.
+//
+// That byte-order agreement is the whole point of this file. v1 shipped dead
+// because a Bitcoin hash was compared in the wrong order and every test passed
+// anyway, so it is checked here against an independent serializer rather than
+// assumed.
 
-const sha256d = (b) =>
-  createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
+const deployer = simnet.getAccounts().get("deployer");
+const C = "at-stake-sim";
+
+const sha256 = (b) => createHash("sha256").update(b).digest();
+const sha256d = (b) => sha256(sha256(b));
 
 // --- an independent Bitcoin serializer, so the Clarity parser is checked
 // --- against something that did not come from the same code path.
@@ -39,159 +49,117 @@ function serializeTx({ inputs, outputs, version = 2, locktime = 0 }) {
   return Buffer.concat(parts);
 }
 
-// A P2WSH output is OP_0 <32-byte script hash>.
-const p2wsh = (witnessScript) =>
-  Buffer.concat([Buffer.from([0x00, 0x20]), createHash("sha256").update(witnessScript).digest()]);
+const p2wsh = (ws) => Buffer.concat([Buffer.from([0x00, 0x20]), sha256(ws)]);
+const p2wpkh = (h20) => Buffer.concat([Buffer.from([0x00, 0x14]), h20]);
 
-// P2WPKH: OP_0 <20-byte key hash>
-const p2wpkh = (hash20) => Buffer.concat([Buffer.from([0x00, 0x14]), hash20]);
-
-function getOutput(txBuf, index) {
-  const r = simnet.callReadOnlyFn(
-    P, "get-output", [Cl.buffer(txBuf), Cl.uint(index)], deployer
-  );
-  return r.result;
-}
-
-function spendsOutpoint(txBuf, txid, vout) {
-  const r = simnet.callReadOnlyFn(
-    P, "tx-spends-outpoint",
-    [Cl.buffer(txBuf), Cl.buffer(txid), Cl.uint(vout)], deployer
-  );
-  return r.result;
-}
+const spends = (txBuf, txid, vout) =>
+  simnet.callReadOnlyFn(C, "tx-spends-outpoint",
+    [Cl.buffer(txBuf), Cl.buffer(txid), Cl.uint(vout)], deployer).result;
 
 const SNAP_TXID = sha256d(Buffer.from("the whale's dormant utxo"));
 const OTHER_TXID = sha256d(Buffer.from("somebody else entirely"));
-const LOCK_SCRIPT = Buffer.from("21" + "02".repeat(33) + "ac", "hex"); // stand-in witness script
+const LOCK_SCRIPT = Buffer.from("21" + "02".repeat(33) + "ac", "hex");
+const WALLET = p2wpkh(Buffer.alloc(20, 0xd1));
 
-describe("bitcoin transaction parser in clarity", () => {
-  it("reads a single output's value and scriptPubKey", () => {
-    const tx = serializeTx({
-      inputs: [{ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) }],
-      outputs: [{ value: 24_710_000_000, script: p2wsh(LOCK_SCRIPT) }],
-    });
-    const r = getOutput(tx, 0);
+describe("byte order: the builtin and our parser must agree", () => {
+  // The funding transaction, and its txid computed independently of Clarity.
+  const funding = serializeTx({
+    inputs: [{ txid: OTHER_TXID, vout: 0, script: Buffer.alloc(0) }],
+    outputs: [{ value: 148_712, script: WALLET }],
+  });
+  const fundingTxid = sha256d(funding);   // internal order, by construction
+
+  it("get-bitcoin-tx-output? reports the txid in internal order", () => {
+    // If the builtin returned display order this would be the reverse, and
+    // every spend check downstream would silently never match.
+    const r = simnet.callReadOnlyFn(C, "test-tx-output",
+      [Cl.buffer(funding), Cl.uint(0)], deployer).result;
     expect(r).toBeOk(
-      Cl.tuple({ value: Cl.uint(24_710_000_000), script: Cl.buffer(p2wsh(LOCK_SCRIPT)) })
+      Cl.tuple({
+        txid: Cl.buffer(fundingTxid),
+        amount: Cl.uint(148_712),
+        script: Cl.buffer(WALLET),
+      }),
     );
   });
 
-  it("reads the right output out of several", () => {
-    const change = p2wpkh(Buffer.alloc(20, 9));
-    const tx = serializeTx({
-      inputs: [{ txid: SNAP_TXID, vout: 3, script: Buffer.alloc(0) }],
-      outputs: [
-        { value: 1_000, script: change },
-        { value: 24_710_000_000, script: p2wsh(LOCK_SCRIPT) },
-        { value: 5_500, script: change },
-      ],
+  it("a lockup spending that output is detected using the builtin's own txid", () => {
+    // This is exactly what resolve-bonded does: take (get txid funded) straight
+    // from the builtin and hand it to tx-spends-outpoint. If the two disagreed
+    // on byte order, YES could never be proven for anyone.
+    const lockup = serializeTx({
+      inputs: [{ txid: fundingTxid, vout: 0, script: Buffer.alloc(0) }],
+      outputs: [{ value: 148_000, script: p2wsh(LOCK_SCRIPT) }],
     });
-    expect(getOutput(tx, 1)).toBeOk(
-      Cl.tuple({ value: Cl.uint(24_710_000_000), script: Cl.buffer(p2wsh(LOCK_SCRIPT)) })
-    );
-    expect(getOutput(tx, 0)).toBeOk(
-      Cl.tuple({ value: Cl.uint(1_000), script: Cl.buffer(change) })
-    );
-    expect(getOutput(tx, 2)).toBeOk(
-      Cl.tuple({ value: Cl.uint(5_500), script: Cl.buffer(change) })
-    );
+    expect(spends(lockup, fundingTxid, 0)).toBeOk(Cl.bool(true));
   });
 
-  it("handles non-empty scriptSigs (legacy P2PKH-style inputs)", () => {
-    const bigSig = Buffer.alloc(107, 0x47);
-    const tx = serializeTx({
+  it("the REVERSED txid does not match, proving the orders are not interchangeable", () => {
+    const lockup = serializeTx({
+      inputs: [{ txid: fundingTxid, vout: 0, script: Buffer.alloc(0) }],
+      outputs: [{ value: 148_000, script: p2wsh(LOCK_SCRIPT) }],
+    });
+    const reversed = Buffer.from(fundingTxid).reverse();
+    expect(spends(lockup, reversed, 0)).toBeOk(Cl.bool(false));
+  });
+});
+
+describe("tx-spends-outpoint", () => {
+  it("detects the outpoint among several inputs", () => {
+    const lockup = serializeTx({
       inputs: [
-        { txid: OTHER_TXID, vout: 1, script: bigSig },
-        { txid: SNAP_TXID, vout: 0, script: bigSig },
+        { txid: OTHER_TXID, vout: 3, script: Buffer.alloc(0) },
+        { txid: SNAP_TXID, vout: 1, script: Buffer.alloc(0) },
+        { txid: OTHER_TXID, vout: 7, script: Buffer.alloc(0) },
       ],
-      outputs: [{ value: 777, script: p2wsh(LOCK_SCRIPT) }],
+      outputs: [{ value: 100_000, script: p2wsh(LOCK_SCRIPT) }],
     });
-    expect(getOutput(tx, 0)).toBeOk(
-      Cl.tuple({ value: Cl.uint(777), script: Cl.buffer(p2wsh(LOCK_SCRIPT)) })
-    );
+    expect(spends(lockup, SNAP_TXID, 1)).toBeOk(Cl.bool(true));
   });
 
-  it("rejects an out-of-range output index", () => {
-    const tx = serializeTx({
-      inputs: [{ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) }],
-      outputs: [{ value: 1, script: p2wpkh(Buffer.alloc(20)) }],
-    });
-    expect(getOutput(tx, 5)).toBeErr(Cl.uint(301));
-  });
-
-  it("DETECTS that the lockup spends the snapshot outpoint", () => {
-    const tx = serializeTx({
-      inputs: [
-        { txid: OTHER_TXID, vout: 0, script: Buffer.alloc(0) },
-        { txid: SNAP_TXID, vout: 2, script: Buffer.alloc(0) },
-      ],
-      outputs: [{ value: 24_710_000_000, script: p2wsh(LOCK_SCRIPT) }],
-    });
-    expect(spendsOutpoint(tx, SNAP_TXID, 2)).toBeOk(Cl.bool(true));
-  });
-
-  it("REJECTS the right txid at the wrong vout", () => {
-    const tx = serializeTx({
-      inputs: [{ txid: SNAP_TXID, vout: 2, script: Buffer.alloc(0) }],
-      outputs: [{ value: 1, script: p2wpkh(Buffer.alloc(20)) }],
-    });
-    expect(spendsOutpoint(tx, SNAP_TXID, 7)).toBeOk(Cl.bool(false));
-  });
-
-  it("REJECTS an unrelated transaction", () => {
+  it("rejects an unrelated transaction", () => {
     const tx = serializeTx({
       inputs: [{ txid: OTHER_TXID, vout: 0, script: Buffer.alloc(0) }],
-      outputs: [{ value: 1, script: p2wpkh(Buffer.alloc(20)) }],
+      outputs: [{ value: 100_000, script: p2wsh(LOCK_SCRIPT) }],
     });
-    expect(spendsOutpoint(tx, SNAP_TXID, 0)).toBeOk(Cl.bool(false));
+    expect(spends(tx, SNAP_TXID, 0)).toBeOk(Cl.bool(false));
   });
 
-  it("handles a 3-in 3-out transaction", () => {
-    const tx = serializeTx({
-      inputs: [
-        { txid: OTHER_TXID, vout: 0, script: Buffer.alloc(72, 1) },
-        { txid: SNAP_TXID, vout: 1, script: Buffer.alloc(0) },
-        { txid: OTHER_TXID, vout: 5, script: Buffer.alloc(107, 2) },
-      ],
-      outputs: [
-        { value: 100, script: p2wpkh(Buffer.alloc(20, 1)) },
-        { value: 200, script: p2wpkh(Buffer.alloc(20, 2)) },
-        { value: 24_710_000_000, script: p2wsh(LOCK_SCRIPT) },
-      ],
-    });
-    expect(spendsOutpoint(tx, SNAP_TXID, 1)).toBeOk(Cl.bool(true));
-    expect(getOutput(tx, 2)).toBeOk(
-      Cl.tuple({ value: Cl.uint(24_710_000_000), script: Cl.buffer(p2wsh(LOCK_SCRIPT)) })
-    );
-  });
-
-  it("txid matches an independent sha256d of the same bytes", () => {
+  it("rejects the right txid at the wrong vout", () => {
     const tx = serializeTx({
       inputs: [{ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) }],
-      outputs: [{ value: 42, script: p2wsh(LOCK_SCRIPT) }],
+      outputs: [{ value: 100_000, script: p2wsh(LOCK_SCRIPT) }],
     });
-    const r = simnet.callReadOnlyFn(P, "tx-id", [Cl.buffer(tx)], deployer);
-    expect(Buffer.from(r.result.value, "hex")).toEqual(sha256d(tx));
+    expect(spends(tx, SNAP_TXID, 1)).toBeOk(Cl.bool(false));
   });
 
-  it("END TO END: lockup tx spends the snapshot AND pays the P2WSH", () => {
-    const tx = serializeTx({
+  it("walks past inputs carrying long scriptSigs", () => {
+    // The cursor advances by a varint-prefixed script length; a fixed stride
+    // would desynchronise here and read garbage as the next txid.
+    const lockup = serializeTx({
       inputs: [
-        { txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) },
-        { txid: SNAP_TXID, vout: 1, script: Buffer.alloc(0) },
+        { txid: OTHER_TXID, vout: 0, script: Buffer.alloc(253, 0xab) },
+        { txid: SNAP_TXID, vout: 2, script: Buffer.alloc(0) },
       ],
-      outputs: [
-        { value: 24_710_000_000, script: p2wsh(LOCK_SCRIPT) },
-        { value: 12_000, script: p2wpkh(Buffer.alloc(20, 7)) },
-      ],
+      outputs: [{ value: 100_000, script: p2wsh(LOCK_SCRIPT) }],
     });
-    // condition 1: the coins in question really moved
-    expect(spendsOutpoint(tx, SNAP_TXID, 0)).toBeOk(Cl.bool(true));
-    // condition 2: they landed in a lockup-shaped output of the declared size
-    const out = getOutput(tx, 0);
-    expect(out).toBeOk(
-      Cl.tuple({ value: Cl.uint(24_710_000_000), script: Cl.buffer(p2wsh(LOCK_SCRIPT)) })
-    );
+    expect(spends(lockup, SNAP_TXID, 2)).toBeOk(Cl.bool(true));
+  });
+
+  it("finds an outpoint at the last walkable input", () => {
+    const inputs = [];
+    for (let i = 0; i < 23; i++) inputs.push({ txid: OTHER_TXID, vout: i, script: Buffer.alloc(0) });
+    inputs.push({ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) });
+    const tx = serializeTx({ inputs, outputs: [{ value: 1, script: p2wsh(LOCK_SCRIPT) }] });
+    expect(spends(tx, SNAP_TXID, 0)).toBeOk(Cl.bool(true));
+  });
+
+  it("refuses a transaction with more inputs than it can walk", () => {
+    // Loud failure, not a silent false: a wrong answer here would read as
+    // "these coins did not fund the bond" and settle a true market NO.
+    const inputs = [];
+    for (let i = 0; i < 25; i++) inputs.push({ txid: OTHER_TXID, vout: i, script: Buffer.alloc(0) });
+    const tx = serializeTx({ inputs, outputs: [{ value: 1, script: p2wsh(LOCK_SCRIPT) }] });
+    expect(spends(tx, SNAP_TXID, 0)).toBeErr(Cl.uint(302));
   });
 });
