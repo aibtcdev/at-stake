@@ -153,14 +153,30 @@ function buildLockup(sats = SNAP_SATS, stakerPrincipal = staker, prevTxid = SNAP
 // The funding proof: snapTx pays WALLET_SPK at output 0, and the lockup spends
 // it. That is what proves the bonded coins came from the subject's wallet
 // without naming one UTXO up front.
-function fundingProof() {
-  const b = inBlock(snapTx);
-  return { tx: snapTx, vout: 0, block: b };
+function fundingProof(tx = snapTx, vout = 0) {
+  return { tx, vout, block: inBlock(tx) };
+}
+
+// A second coin paying the same wallet. Real, mined, and NOT in the photo
+// unless somebody commits it with add-snapshot.
+const otherCoinTx = ser({
+  inputs: [{ txid: sha256d(Buffer.from("another older utxo")), vout: 0, script: Buffer.alloc(0) }],
+  outputs: [{ value: 9_000_000_000, script: WALLET_SPK }],
+});
+const OTHER_COIN_TXID = sha256d(otherCoinTx);
+
+function addSnapshot(id, tx = otherCoinTx, vout = 0, height = 1, who = alice) {
+  const b = inBlock(tx);
+  return simnet.callPublicFn(C, "add-snapshot", [
+    Cl.uint(id), Cl.buffer(tx), Cl.uint(vout), Cl.uint(height),
+    Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
+    Cl.list(b.path.map((x) => Cl.buffer(x))),
+  ], who);
 }
 
 function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight = null,
                        opts = {}) {
-  const f = fundingProof();
+  const f = fundingProof(opts.fundingTx ?? snapTx, opts.fundingVout ?? 0);
   const h = lockupHeight ?? simnet.burnBlockHeight;
   const unlock = opts.unlock ?? UNLOCK;
   const unlockBytes = opts.unlockBytes ?? STAKER_UNLOCK_BYTES;
@@ -182,13 +198,13 @@ function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight
 // isL1 false takes pox-5's sBTC-locked branch, which really moves sBTC out of
 // the staker, so the amount there is capped by the wallet's balance. The L1
 // branch only needs the amount to appear in the Bitcoin output.
-function setBond(isL1, sats, who = staker) {
+function setBond(isL1, sats, who = staker, prevTxid = SNAP_TXID) {
   const idx = bondSetup();
   if (!isL1) {
     registerSbtcBond(who, deployer, idx, Math.min(sats, 100_000_000));
     return null;
   }
-  const lk = buildLockup(sats, who);
+  const lk = buildLockup(sats, who, prevTxid);
   registerL1Bond(who, deployer, idx,
     { tx: lk.tx, header: lk.block.header, amount: sats, unlockHeight: UNLOCK });
   return lk;
@@ -295,6 +311,52 @@ describe("create-market: proving the snapshot on chain", () => {
   });
 });
 
+describe("the snapshot: which coins this market is about", () => {
+  it("records the coin proven at create", () => {
+    const { id } = createMarket();
+    const r = simnet.callReadOnlyFn(C, "get-snapshot",
+      [Cl.uint(id), Cl.buffer(SNAP_TXID), Cl.uint(0)], deployer).result;
+    expect(Number(r.value.value.sats.value)).toBe(SNAP_SATS);
+  });
+
+  it("commits another coin the wallet already held", () => {
+    const { id } = createMarket();
+    expect(addSnapshot(id).result).toBeOk(Cl.uint(9_000_000_000));
+    const r = simnet.callReadOnlyFn(C, "get-snapshot",
+      [Cl.uint(id), Cl.buffer(OTHER_COIN_TXID), Cl.uint(0)], deployer).result;
+    expect(r.type).not.toBe("none");
+  });
+
+  it("REJECTS a coin mined after the market opened", () => {
+    // The point of the photo: money arriving later is not what was asked about.
+    const { id } = createMarket();
+    const after = simnet.burnBlockHeight;
+    expect(addSnapshot(id, otherCoinTx, 0, after).result).toBeErr(Cl.uint(123));
+  });
+
+  it("REJECTS a coin paying a different wallet", () => {
+    const { id } = createMarket();
+    const stranger = ser({
+      inputs: [{ txid: SNAP_PREV, vout: 0, script: Buffer.alloc(0) }],
+      outputs: [{ value: 5_000_000, script: p2wpkh(Buffer.alloc(20, 0x99)) }],
+    });
+    expect(addSnapshot(id, stranger).result).toBeErr(Cl.uint(204));
+  });
+
+  it("REJECTS committing the same coin twice", () => {
+    const { id } = createMarket();
+    expect(addSnapshot(id).result.type).toBe("ok");
+    expect(addSnapshot(id).result).toBeErr(Cl.uint(124));
+  });
+
+  it("grows the market's snapshot total", () => {
+    const { id } = createMarket();
+    addSnapshot(id);
+    const m = simnet.callReadOnlyFn(C, "get-market", [Cl.uint(id)], deployer).result.value.value;
+    expect(Number(m["snapshot-sats"].value)).toBe(SNAP_SATS + 9_000_000_000);
+  });
+});
+
 describe("resolve-bonded: the full YES claim", () => {
   it("resolves BONDED when every check passes", () => {
     const { id } = createMarket();
@@ -392,6 +454,24 @@ describe("resolve-bonded: the full YES claim", () => {
     simnet.mineEmptyBurnBlocks(1);
     const lk = setBond(true, SNAP_SATS);
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(211));
+  });
+
+  // Coins outside the photo cannot settle the market, even paying the same
+  // wallet. Without this, a deposit made after the question was asked would
+  // answer it.
+  it("REJECTS bonded coins that were never committed to this market", () => {
+    const { id } = createMarket();
+    const lk = setBond(true, SNAP_SATS, staker, OTHER_COIN_TXID);
+    expect(resolveBonded(id, lk, bob, staker, null,
+      { fundingTx: otherCoinTx, fundingVout: 0 }).result).toBeErr(Cl.uint(122));
+  });
+
+  it("SETTLES once that same coin is committed with add-snapshot", () => {
+    const { id } = createMarket();
+    expect(addSnapshot(id).result.type).toBe("ok");
+    const lk = setBond(true, SNAP_SATS, staker, OTHER_COIN_TXID);
+    expect(resolveBonded(id, lk, bob, staker, null,
+      { fundingTx: otherCoinTx, fundingVout: 0 }).result).toBeOk(Cl.uint(1));
   });
 
   it("REJECTS a real pox-5 lockup built for a later unlock height", () => {
