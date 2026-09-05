@@ -19,12 +19,14 @@ cat >> contracts/at-stake-sim.clar <<'SIM'
 
 ;; ===== SIMNET ONLY. Not present in the deployed contract. =====
 (define-public (test-seed-market (id uint) (title (string-ascii 64))
-                                 (subject-script (buff 34)) (bond-index uint)
+                                 (subject-script (buff 34))
+                                 (named-staker (optional principal)) (bond-index uint)
                                  (close-height uint)
                                  (created-at uint) (threshold-sats uint) (snapshot-sats uint))
   (begin
     (map-set markets { id: id }
-      { title: title, subject-script: subject-script, bond-index: bond-index,
+      { title: title, subject-script: subject-script, staker: named-staker,
+        bond-index: bond-index,
         close-height: close-height,
         created-at: created-at, threshold-sats: threshold-sats,
         snapshot-sats: snapshot-sats, status: STATUS_OPEN,
