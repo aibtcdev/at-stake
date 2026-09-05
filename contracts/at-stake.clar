@@ -2,6 +2,14 @@
 
 (define-constant MIN_SNAPSHOT_SATS u1)
 
+;; Shortest market anyone may open, in burn blocks (~1 day).
+;;
+;; A bond takes real time: the staker has to build a Bitcoin timelock and
+;; register it. Any window shorter than that cannot resolve YES no matter what
+;; happens, so a one-block market is not a question, it is a guaranteed NO with
+;; a question's wording. This is the same lever as an unreachable threshold.
+(define-constant MIN_WINDOW_BLOCKS u144)
+
 (define-constant STATUS_OPEN   u0)
 (define-constant STATUS_BONDED u1) ;; YES
 (define-constant STATUS_IDLE   u2) ;; NO
@@ -37,6 +45,8 @@
 (define-constant ERR_ORDER_CANCELLED    (err u116))
 (define-constant ERR_FILL_TOO_SMALL     (err u117))
 (define-constant ERR_FILL_TOO_LARGE     (err u118))
+(define-constant ERR_WINDOW_TOO_SHORT   (err u119))
+(define-constant ERR_FLOOR_NOT_FORWARD  (err u120))
 
 ;; Smallest slice of an order anyone may take. Without a floor, a griefer can
 ;; chew an order away one share at a time, each nibble costing the book a state
@@ -162,7 +172,7 @@
         (id    (var-get next-market-id)))
     (asserts! (> (len title) u0) ERR_TITLE_EMPTY)
     (asserts! (is-none (map-get? market-by-terms { terms: terms })) ERR_EXISTS)
-    (asserts! (> close-height burn-block-height) ERR_WINDOW_CLOSED)
+    (asserts! (>= close-height (+ burn-block-height MIN_WINDOW_BLOCKS)) ERR_WINDOW_TOO_SHORT)
     (try! (tx-was-mined burn-height header txid tx-index merkle-path))
     (let ((out (try! (contract-call? .btc-parse get-output snap-tx snap-vout))))
       (asserts! (is-eq (get script out) (unwrap-panic (as-max-len? subject-script u128)))
@@ -274,7 +284,7 @@
 ;; into a partial state: either the floor moves or it does not.
 (define-public (cancel-orders-below (min-nonce uint))
   (begin
-    (asserts! (> min-nonce (get-order-floor tx-sender)) ERR_ZERO)
+    (asserts! (> min-nonce (get-order-floor tx-sender)) ERR_FLOOR_NOT_FORWARD)
     (map-set order-floor { seller: tx-sender } { min-nonce: min-nonce })
     (print { event: "cancel", seller: tx-sender, min-nonce: min-nonce })
     (ok min-nonce)))

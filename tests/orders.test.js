@@ -156,7 +156,7 @@ describe("cancel-orders-below", () => {
 
   it("the floor can only move forward", () => {
     simnet.callPublicFn(C, "cancel-orders-below", [Cl.uint(10)], seller);
-    expect(simnet.callPublicFn(C, "cancel-orders-below", [Cl.uint(4)], seller).result).toBeErr(Cl.uint(106));
+    expect(simnet.callPublicFn(C, "cancel-orders-below", [Cl.uint(4)], seller).result).toBeErr(Cl.uint(120));
   });
 });
 

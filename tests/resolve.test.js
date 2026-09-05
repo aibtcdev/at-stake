@@ -379,3 +379,19 @@ describe("resolve-bonded: the full YES claim", () => {
     expect(simnet.callPublicFn(C, "redeem", [Cl.uint(id)], bob).result).toBeErr(Cl.uint(107));
   });
 });
+
+describe("the creator cannot open a market too short to win", () => {
+  // A bond needs a Bitcoin timelock built and registered, and resolve-bonded
+  // requires the lockup to post-date the market. A window shorter than that
+  // cannot resolve YES whatever happens, so it is a rigged NO, not a question.
+  it("REJECTS a market that closes almost immediately", () => {
+    const b = simnet.burnBlockHeight;
+    expect(createMarketRaw(b + 1).result).toBeErr(Cl.uint(119));
+    expect(createMarketRaw(b + 143).result).toBeErr(Cl.uint(119));
+  });
+
+  it("accepts a market a day out", () => {
+    const b = simnet.burnBlockHeight;
+    expect(createMarketRaw(b + 144).result.type).toBe("ok");
+  });
+});
