@@ -276,26 +276,26 @@
 
 (define-public (mint-complete-set (id uint) (sats uint))
   (let ((m   (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (pos (get-position id tx-sender)))
+        (pos (get-position id contract-caller)))
     (asserts! (> sats u0) ERR_ZERO)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     ;; write state before the transfer
-    (map-set positions { id: id, who: tx-sender }
+    (map-set positions { id: id, who: contract-caller }
              { idle: (+ (get idle pos) sats), bonded: (+ (get bonded pos) sats) })
     (map-set markets { id: id }
              (merge m { vault:       (+ (get vault m) sats),
                         idle-circ:   (+ (get idle-circ m) sats),
                         bonded-circ: (+ (get bonded-circ m) sats) }))
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-                          transfer sats tx-sender current-contract none))
-    (print { event: "mint", id: id, sats: sats, who: tx-sender })
+                          transfer sats contract-caller current-contract none))
+    (print { event: "mint", id: id, sats: sats, who: contract-caller })
     (ok sats)))
 
 (define-public (merge-complete-set (id uint) (sats uint))
   (let ((m   (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (pos (get-position id tx-sender))
-        (who tx-sender))
+        (pos (get-position id contract-caller))
+        (who contract-caller))
     (asserts! (> sats u0) ERR_ZERO)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (and (>= (get idle pos) sats) (>= (get bonded pos) sats)) ERR_NO_POSITION)
@@ -314,8 +314,8 @@
 
 (define-public (transfer-shares (id uint) (side uint) (amount uint) (to principal))
   (let ((m    (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (from tx-sender)
-        (src  (get-position id tx-sender))
+        (from contract-caller)
+        (src  (get-position id contract-caller))
         (dst  (get-position id to)))
     (asserts! (> amount u0) ERR_ZERO)
     (asserts! (not (is-eq to from)) ERR_SELF_TRANSFER)
@@ -347,9 +347,9 @@
 
 (define-public (cancel-orders-below (min-nonce uint))
   (begin
-    (asserts! (> min-nonce (get-order-floor tx-sender)) ERR_FLOOR_NOT_FORWARD)
-    (map-set order-floor { seller: tx-sender } { min-nonce: min-nonce })
-    (print { event: "cancel", seller: tx-sender, min-nonce: min-nonce })
+    (asserts! (> min-nonce (get-order-floor contract-caller)) ERR_FLOOR_NOT_FORWARD)
+    (map-set order-floor { seller: contract-caller } { min-nonce: min-nonce })
+    (print { event: "cancel", seller: contract-caller, min-nonce: min-nonce })
     (ok min-nonce)))
 
 (define-read-only (order-filled (hash (buff 32)))
@@ -372,9 +372,9 @@
                  (fill-amount uint))
   (let ((m         (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
         (hash      (order-hash seller id side amount price-sats nonce expiry))
-        (buyer     tx-sender)
+        (buyer     contract-caller)
         (src       (get-position id seller))
-        (dst       (get-position id tx-sender))
+        (dst       (get-position id contract-caller))
         (already   (order-filled hash))
         (remaining (- amount (order-filled hash)))
         (cost      (fill-price price-sats amount fill-amount)))
@@ -483,8 +483,8 @@
 
 (define-public (redeem (id uint))
   (let ((m      (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (pos    (get-position id tx-sender))
-        (who    tx-sender)
+        (pos    (get-position id contract-caller))
+        (who    contract-caller)
         (status (get status m)))
     (asserts! (not (is-eq status STATUS_OPEN)) ERR_UNRESOLVED)
     (let ((payout (if (is-eq status STATUS_BONDED) (get bonded pos) (get idle pos))))
