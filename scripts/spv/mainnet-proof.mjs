@@ -56,10 +56,14 @@ export async function mainnetProof(txid, vout) {
   const out = info.vout[vout];
   if (!out) throw new Error(`no output ${vout}`);
 
+  // verify-merkle-proof needs the block's transaction count
+  const block = await get(`/block/${blockHash}`);
+
   return {
     txHex: legacy.toString("hex"),
     headerHex, blockHeight,
     txIndex: mp.pos,
+    txCount: block.tx_count,
     path,
     scriptPubKey: out.scriptpubkey,
     address: out.scriptpubkey_address,
@@ -71,7 +75,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const [txid, vout] = process.argv.slice(2);
   const p = await mainnetProof(txid, Number(vout ?? 0));
   console.log("  bitcoin block :", p.blockHeight);
-  console.log("  tx-index      :", p.txIndex, "| merkle depth", p.path.length);
+  console.log("  tx-index      :", p.txIndex, "of", p.txCount, "| merkle depth", p.path.length);
   console.log("  output value  :", p.valueSats.toLocaleString(), "sats");
   console.log("  address       :", p.address);
   console.log("  scriptPubKey  :", p.scriptPubKey);
