@@ -50,6 +50,7 @@
 (define-constant ERR_SNAPSHOT_EXISTS   (err u124))
 (define-constant ERR_SNAPSHOT_FROZEN   (err u125))
 (define-constant ERR_WRONG_STAKER      (err u126))
+(define-constant ERR_ALREADY_BONDED    (err u127))
 
 (define-constant MIN_FILL_BPS u100)
 
@@ -230,6 +231,14 @@
     ;; the window must close before this period's coins unlock
     (asserts! (< close-height (contract-call? POX5 get-bond-l1-unlock-height bond-index))
               ERR_WINDOW_TOO_LONG)
+    ;; a named staker who already holds this period's membership makes the
+    ;; market a lookup, not a prediction
+    (asserts! (match named-staker
+                who (match (contract-call? POX5 get-bond-membership who)
+                      mem (not (is-eq (get bond-index mem) bond-index))
+                      true)
+                true)
+              ERR_ALREADY_BONDED)
     (try! (tx-was-mined burn-height header (get txid out) tx-index tx-count merkle-path))
     (begin
       (asserts! (is-eq (get script out) subject-script) ERR_WRONG_SCRIPT)
