@@ -1,4 +1,8 @@
 ;; At Stake: did these coins enter a Stacks protocol bond before burn height H?
+;;
+;; Early exit: YES is terminal. The market asks whether the coins ENTERED a
+;; bond, not whether they stayed, so a staker exiting later does not reopen it.
+;; Exit before anyone proves YES and the window closes NO.
 
 (define-constant MIN_SNAPSHOT_SATS u1)
 
