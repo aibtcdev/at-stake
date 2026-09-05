@@ -44,6 +44,7 @@
 (define-constant ERR_NOT_A_LOCKUP       (err u313))
 (define-constant ERR_NO_BOND            (err u211))
 (define-constant ERR_UNLOCK_TOO_EARLY   (err u212))
+(define-constant ERR_WINDOW_TOO_LONG    (err u121))
 
 (define-constant MIN_FILL_BPS u100)
 
@@ -54,6 +55,7 @@
   {
     title:          (string-ascii 64),
     subject-script: (buff 34),
+    bond-index:     uint,
     close-height:   uint,
     created-at:     uint,
     threshold-sats: uint,
@@ -170,10 +172,11 @@
               ERR_BAD_MERKLE)
     (ok true)))
 
-(define-read-only (terms-of (subject-script (buff 34)) (close-height uint) (threshold-sats uint))
-  (sha256 (concat (concat subject-script
-                          (unwrap-panic (to-consensus-buff? close-height)))
-                  (unwrap-panic (to-consensus-buff? threshold-sats)))))
+(define-read-only (terms-of (subject-script (buff 34)) (bond-index uint)
+                            (close-height uint) (threshold-sats uint))
+  (sha256 (concat (concat subject-script (unwrap-panic (to-consensus-buff? bond-index)))
+                  (concat (unwrap-panic (to-consensus-buff? close-height))
+                          (unwrap-panic (to-consensus-buff? threshold-sats))))))
 
 (define-read-only (get-market (id uint))
   (map-get? markets { id: id }))
@@ -190,6 +193,7 @@
 (define-public (create-market
                  (title (string-ascii 64))
                  (subject-script (buff 34))
+                 (bond-index uint)
                  (close-height uint)
                  (threshold-sats uint)
                  (snap-tx (buff 16384))
@@ -200,11 +204,14 @@
                  (tx-count uint)
                  (merkle-path (list 14 (buff 32))))
   (let ((out   (unwrap! (get-bitcoin-tx-output? snap-tx snap-vout) ERR_PARSE))
-        (terms (terms-of subject-script close-height threshold-sats))
+        (terms (terms-of subject-script bond-index close-height threshold-sats))
         (id    (var-get next-market-id)))
     (asserts! (> (len title) u0) ERR_TITLE_EMPTY)
     (asserts! (is-none (map-get? market-by-terms { terms: terms })) ERR_EXISTS)
     (asserts! (>= close-height (+ burn-block-height MIN_WINDOW_BLOCKS)) ERR_WINDOW_TOO_SHORT)
+    ;; the window must close before this period's coins unlock
+    (asserts! (< close-height (contract-call? POX5 get-bond-l1-unlock-height bond-index))
+              ERR_WINDOW_TOO_LONG)
     (try! (tx-was-mined burn-height header (get txid out) tx-index tx-count merkle-path))
     (begin
       (asserts! (is-eq (get script out) subject-script) ERR_WRONG_SCRIPT)
@@ -215,11 +222,12 @@
       (var-set next-market-id (+ id u1))
       (map-set market-by-terms { terms: terms } { id: id })
       (map-set markets { id: id }
-        { title: title, subject-script: subject-script, close-height: close-height,
+        { title: title, subject-script: subject-script, bond-index: bond-index,
+          close-height: close-height,
           created-at: burn-block-height, threshold-sats: threshold-sats,
           snapshot-sats: (get amount out), status: STATUS_OPEN,
           vault: u0, idle-circ: u0, bonded-circ: u0 })
-      (print { event: "create", id: id, title: title, terms: terms,
+      (print { event: "create", id: id, title: title, terms: terms, bond-index: bond-index,
                snapshot-sats: (get amount out), close-height: close-height,
                created-at: burn-block-height })
       (ok id))))
@@ -369,7 +377,6 @@
 ;; Settle YES. Anyone may call it; the caller brings the proofs.
 (define-public (resolve-bonded
                  (id uint)
-                 (bond-index uint)
                  (staker principal)
                  (unlock-burn-height uint)
                  (staker-unlock-bytes (buff 683))
@@ -388,10 +395,11 @@
                  (funding-tx-count uint)
                  (funding-path (list 14 (buff 32))))
   (let ((m       (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
+        (bidx    (get bond-index (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET)))
         (lockup  (unwrap! (get-bitcoin-tx-output? lockup-tx lockup-vout) ERR_PARSE))
         (funded  (unwrap! (get-bitcoin-tx-output? funding-tx funding-vout) ERR_PARSE))
-        (bond    (unwrap! (contract-call? POX5 get-protocol-bond bond-index) ERR_NO_BOND))
-        (floor   (contract-call? POX5 get-bond-l1-unlock-height bond-index)))
+        (bond    (unwrap! (contract-call? POX5 get-protocol-bond bidx) ERR_NO_BOND))
+        (floor   (contract-call? POX5 get-bond-l1-unlock-height bidx)))
     ;; 1. open and inside the window
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
@@ -418,12 +426,12 @@
     ;; 6. pox-5 holds a live L1 bond for this staker at that index
     (let ((mem (unwrap! (contract-call? POX5 get-bond-membership staker)
                         ERR_NO_MEMBERSHIP)))
-      (asserts! (is-eq (get bond-index mem) bond-index) ERR_NO_MEMBERSHIP)
+      (asserts! (is-eq (get bond-index mem) bidx) ERR_NO_MEMBERSHIP)
       (asserts! (get is-l1-lock mem) ERR_NOT_L1)
       (asserts! (>= (get amount-sats mem) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
       (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
       (print { event: "resolve", id: id, outcome: "bonded", staker: staker,
-               bond-index: bond-index, sats: (get amount-sats mem),
+               bond-index: bidx, sats: (get amount-sats mem),
                lockup-burn-height: lockup-burn-height })
       (ok STATUS_BONDED))))
 
