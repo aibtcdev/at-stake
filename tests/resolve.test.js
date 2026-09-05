@@ -104,7 +104,7 @@ const SNAP_TXID = sha256d(snapTx);
 // (script, close-height, threshold), so distinct markets need distinct terms --
 // varying close-height is enough.
 function createMarketRaw(closeHeight, threshold = THRESHOLD, title = "will it bond",
-                         bondIndex = BOND_INDEX, namedStaker = Cl.none()) {
+                         bondIndex = BOND_INDEX, namedStaker = Cl.none(), who = alice) {
   const b = inBlock(snapTx);
   return simnet.callPublicFn(C, "create-market", [
     Cl.stringAscii(title), Cl.buffer(WALLET_SPK), namedStaker, Cl.uint(bondIndex),
@@ -112,7 +112,7 @@ function createMarketRaw(closeHeight, threshold = THRESHOLD, title = "will it bo
     Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
     Cl.buffer(b.header), Cl.uint(b.index), Cl.uint(b.count),
     Cl.list(b.path.map((x) => Cl.buffer(x))),
-  ], alice);
+  ], who);
 }
 
 let closeSeq = 500;
@@ -481,7 +481,7 @@ describe("resolve-bonded: the full YES claim", () => {
   // pox-5 records that a staker is a member but never which Bitcoin backs it,
   // so an unnamed market can be settled against any stranger's live bond.
   it("REJECTS a stranger's membership when the market names a staker", () => {
-    const r = createMarketRaw(750, THRESHOLD, "named", BOND_INDEX, Cl.some(Cl.principal(alice)));
+    const r = createMarketRaw(750, THRESHOLD, "named", BOND_INDEX, Cl.some(Cl.principal(alice)), alice);
     const id = Number(r.result.value.value);
     simnet.mineEmptyBurnBlocks(1);
     const lk = setBond(true, SNAP_SATS, staker);   // a real bond, wrong person
@@ -493,15 +493,22 @@ describe("resolve-bonded: the full YES claim", () => {
     // only has to build a lockbox around a membership that is already there.
     setBond(true, SNAP_SATS, staker);
     expect(createMarketRaw(752, THRESHOLD, "already", BOND_INDEX,
-      Cl.some(Cl.principal(staker))).result).toBeErr(Cl.uint(127));
+      Cl.some(Cl.principal(staker)), staker).result).toBeErr(Cl.uint(127));
   });
 
   it("SETTLES when the named staker is the one who bonded", () => {
-    const r = createMarketRaw(751, THRESHOLD, "named ok", BOND_INDEX, Cl.some(Cl.principal(staker)));
+    const r = createMarketRaw(751, THRESHOLD, "named ok", BOND_INDEX, Cl.some(Cl.principal(staker)), staker);
     const id = Number(r.result.value.value);
     simnet.mineEmptyBurnBlocks(1);
     const lk = setBond(true, SNAP_SATS, staker);
     expect(resolveBonded(id, lk).result).toBeOk(Cl.uint(1));
+  });
+
+  it("REJECTS naming somebody else as the staker", () => {
+    // Otherwise the creator can name a stranger who will never bond, and sell
+    // YES into a market they know settles NO.
+    expect(createMarketRaw(753, THRESHOLD, "rigged", BOND_INDEX,
+      Cl.some(Cl.principal(staker)), alice).result).toBeErr(Cl.uint(128));
   });
 
   it("REJECTS a real pox-5 lockup built for a later unlock height", () => {
