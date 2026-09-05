@@ -98,19 +98,24 @@ describe("the lockup output is a real pox-5 lockup", () => {
   });
 
   // ---- FAILS on v4: the offset is caller-supplied ---------------------------
-  it("does not let the caller state where the commitment sits", () => {
-    // Every position in the template is fixed once the unlock height is known.
-    // Accepting an offset is what lets a forgery place the commitment anywhere.
-    const args = simnet.getFunctionsInterfaces
-      ? simnet.getFunctionsInterfaces(P)
-      : null;
-    const fn = (simnet.getContractsInterfaces().get(`${deployer}.${P}`)?.functions ?? [])
-      .find((f) => f.name === "verify-lockup");
-    expect(fn, "verify-lockup should still exist").toBeTruthy();
-    expect(
-      fn.args.map((a) => a.name),
-      "commitment-offset must not be a parameter",
-    ).not.toContain("commitment-offset");
+  it("no function anywhere accepts a caller-stated commitment offset", () => {
+    // Every position in the template is fixed once the unlock height is known,
+    // and the unlock height comes from pox-5, not from the caller. An offset
+    // parameter is what lets a forgery put the commitment wherever it likes.
+    //
+    // The replacement does not re-derive the template at all: at-stake asks
+    // pox-5 for `construct-lockup-output-script` and compares the result to
+    // the lockup output byte for byte. So btc-parse loses verify-lockup,
+    // verify-lockup-output and script-commits-to-staker outright and goes back
+    // to being a transaction parser with no opinion about pox-5.
+    const offenders = [];
+    for (const [id, iface] of simnet.getContractsInterfaces()) {
+      if (!id.endsWith(`.${P}`)) continue;
+      for (const fn of iface.functions ?? []) {
+        if ((fn.args ?? []).some((a) => /offset/.test(a.name))) offenders.push(fn.name);
+      }
+    }
+    expect(offenders, "btc-parse must not locate the commitment by offset").toEqual([]);
   });
 
   // ---- FAILS on v4: no notion of which bond window the script belongs to ----
