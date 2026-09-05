@@ -3,8 +3,8 @@
 (define-constant MIN_WINDOW_BLOCKS u144)
 
 (define-constant STATUS_OPEN   u0)
-(define-constant STATUS_BONDED u1) ;; YES
-(define-constant STATUS_IDLE   u2) ;; NO
+(define-constant STATUS_BONDED u1)
+(define-constant STATUS_IDLE   u2)
 
 (define-constant SIDE_IDLE   u0)
 (define-constant SIDE_BONDED u1)
