@@ -258,6 +258,7 @@
   (let ((m   (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
         (out (unwrap! (get-bitcoin-tx-output? snap-tx snap-vout) ERR_PARSE)))
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
+    (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     ;; a coin mined after the question was asked is not part of the snapshot
     (asserts! (<= burn-height (get created-at m)) ERR_SNAPSHOT_TOO_LATE)
     (asserts! (is-none (map-get? snapshots { id: id, txid: (get txid out), vout: snap-vout }))
@@ -428,17 +429,16 @@
                  (lockup-tx-index uint)
                  (lockup-tx-count uint)
                  (lockup-path (list 14 (buff 32)))
-                 (funding-tx (buff 16384))
-                 (funding-vout uint)
-                 (funding-burn-height uint)
-                 (funding-header (buff 80))
-                 (funding-tx-index uint)
-                 (funding-tx-count uint)
-                 (funding-path (list 14 (buff 32))))
+                 (funding-txid (buff 32))
+                 (funding-vout uint))
   (let ((m       (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (bidx    (get bond-index (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET)))
         (lockup  (unwrap! (get-bitcoin-tx-output? lockup-tx lockup-vout) ERR_PARSE))
-        (funded  (unwrap! (get-bitcoin-tx-output? funding-tx funding-vout) ERR_PARSE))
+        ;; already proven on Bitcoin, and paying this wallet, when it was
+        ;; committed. Re-proving it here would establish nothing.
+        (snap    (unwrap! (map-get? snapshots
+                            { id: id, txid: funding-txid, vout: funding-vout })
+                          ERR_NOT_A_SNAPSHOT))
+        (bidx    (get bond-index m))
         (bond    (unwrap! (contract-call? POX5 get-protocol-bond bidx) ERR_NO_BOND))
         (floor   (contract-call? POX5 get-bond-l1-unlock-height bidx)))
     ;; 1. open and inside the window
@@ -446,18 +446,12 @@
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     ;; 2. the lockup must postdate the market
     (asserts! (> lockup-burn-height (get created-at m)) ERR_BOND_TOO_EARLY)
-    ;; 3. both txs are on Bitcoin
+    ;; 3. the lockup is on Bitcoin
     (try! (tx-was-mined lockup-burn-height lockup-header (get txid lockup)
                         lockup-tx-index lockup-tx-count lockup-path))
-    (try! (tx-was-mined funding-burn-height funding-header (get txid funded)
-                        funding-tx-index funding-tx-count funding-path))
-    ;; 4. the bonded coins are ones this market committed to at open
-    (asserts! (is-some (map-get? snapshots
-                { id: id, txid: (get txid funded), vout: funding-vout }))
-              ERR_NOT_A_SNAPSHOT)
-    (asserts! (is-eq (get script funded) (get subject-script m)) ERR_WRONG_SCRIPT)
-    (asserts! (>= (get amount funded) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
-    (asserts! (try! (tx-spends-outpoint lockup-tx (get txid funded) funding-vout))
+    ;; 4. it spends coins this market committed to, and they clear the threshold
+    (asserts! (>= (get sats snap) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
+    (asserts! (try! (tx-spends-outpoint lockup-tx funding-txid funding-vout))
               ERR_NOT_SPENT)
     ;; 5. a real pox-5 lockup for this period; the unlock height is a floor
     (asserts! (>= unlock-burn-height floor) ERR_UNLOCK_TOO_EARLY)
