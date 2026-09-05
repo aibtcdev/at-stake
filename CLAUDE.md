@@ -2,160 +2,151 @@
 
 ## What this is
 
-A prediction market on one bit: **did these Bitcoin coins enter a Stacks
+A prediction market on one bit: **did this wallet's Bitcoin enter a Stacks
 protocol bond before burn height H, or stay idle?**
 
 - Chips are sBTC. The subject is native L1 BTC. They are unrelated.
 - Complete-set design: 1 sat mints 1 IDLE + 1 BONDED share, mergeable back to
-  1 sat before resolve, so the two prices sum to 1. That is where the "68c"
-  number comes from.
+  1 sat before resolve, so the two prices sum to 1.
 - **There is no admin key and no oracle principal.** Do not add one. Status is
   settable by exactly two functions, both permissionless. If you find yourself
   adding an admin path to make a test pass, the test is wrong.
+
+## Deployed on mainnet
+
+| contract | status |
+|---|---|
+| `SP5Y3W3F78NKFH4HYFNDQMJC484VZWKDH35ZR2M9.btc-parse` | current, unchanged since v1 |
+| `SP5Y3W3F78NKFH4HYFNDQMJC484VZWKDH35ZR2M9.at-stake-v3` | **current** |
+| `…at-stake-v2` | superseded: front-running hole, one-UTXO linkage |
+| `…at-stake` (v1) | **inert** — header byte order was wrong, verifies nothing |
+
+The deployed contract calls only these, and nothing else:
+
+| dependency | id |
+|---|---|
+| sBTC | `SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token` |
+| pox-5 | `SP000000000000000000002Q6VF78.pox-5` |
+
+`btc-parse.clar` has no external dependencies at all.
 
 ## Commands
 
 ```
 npm install                   # needs npm >= 11; see toolchain gotchas
-npm test                      # 58 tests, regenerates the sim build first
-npx vitest run -- --costs     # cost numbers
+npm test                      # 67 tests, regenerates the sim build first
+node scripts/spv/mainnet-proof.mjs <txid> <vout>   # build an SPV proof
 ```
 
 ## Build step, do not skip
 
 `contracts/at-stake-sim.clar` is **generated** by `build-sim.sh`. Never edit it,
-never deploy it, never commit it (it is gitignored). It makes exactly three
-substitutions, and all three exist because simnet cannot do the real thing:
+never deploy it, never commit it (gitignored). Two substitutions, both forced by
+simnet:
 
-1. sBTC `SN3VMHXEN...` -> `SM3VDXK3...`. Same sBTC, mainnet address. Clarinet
-   hardcodes that id as the one it auto-funds, so it is the only one that works.
-2. pox-5 `ST000000000000000000002AMW42H.pox-5` -> `pox5-sim`, the same
-   contract under our address so tests hold bond-admin. Not a mock.
-3. `SIM-SKIP-HEADER`, bypassing the burn-header equality check.
+1. pox-5 -> `pox5-sim`, the same contract under our address so tests hold
+   bond-admin. Not a mock; `build-pox5-sim.sh` changes three lines of the real
+   thing.
+2. `SIM-SKIP-HEADER`, bypassing the burn-header equality check.
 
-It then appends `test-` seeders. `npm test` runs the build first. If you edit
-`at-stake.clar` and tests do not change, you forgot.
+sBTC needs no substitution: `at-stake.clar` targets mainnet sBTC, which is also
+the id Clarinet auto-funds in simnet.
+
+**The header bypass is why v1 shipped broken.** `build-sim.sh` patches that
+assert by exact text match, so editing the line silently disables the bypass and
+16 tests fail loudly. That is the intended behaviour — do not "fix" it by
+loosening the match.
 
 ## Toolchain gotchas that already cost time
 
-- Clarinet moved **hirosystems → stx-labs**. Use `@stacks/clarinet-sdk` (3.23.x).
-  `@hirosystems/clarinet-sdk` is stale at 3.8.1 and only reaches Clarity 4 /
-  Epoch 3.3.
-- **Real pox-5 IS visible in simnet** at `ST000000000000000000002AMW42H.pox-5`.
-  It is an epoch-4.0 boot contract, so it needs no `[[project.requirements]]`
-  entry and no deploy. Do not add one.
-- Target **Clarity 6 / Epoch 4.0**. That is what pox-5 needs.
-- Clarity 4 replaced `as-contract`. Asset movements out of the contract need
-  explicit allowances, and `current-contract` replaces `(as-contract tx-sender)`:
-
-```clarity
-(as-contract?
-  ((with-ft 'SM3...sbtc-token "sbtc-token" payout))
-  (try! (contract-call? 'SM3...sbtc-token transfer payout current-contract who none)))
-```
-
+- Use `@stacks/clarinet-sdk` (3.23.x). `@hirosystems/clarinet-sdk` is stale at
+  3.8.1 and only reaches Clarity 4 / Epoch 3.3.
+- **Real pox-5 IS visible in simnet** at `ST000000000000000000002AMW42H.pox-5`
+  (epoch-4.0 boot contract). No requirement entry, no deploy. Do not add one.
+- Target **Clarity 6 / Epoch 4.0**, and pass it explicitly when deploying —
+  see `scripts/deploy/mainnet.mjs`.
+- Clarity 4 replaced `as-contract`. Moving assets out needs explicit allowances,
+  and `current-contract` replaces `(as-contract tx-sender)`.
 - **`npm install` needs npm >= 11.** npm 10.9.0 dies with `Cannot read
-  properties of null (reading 'edgesOut')`, an arborist bug. Do NOT reach for
-  `--legacy-peer-deps` -- it hides the crash and installs vitest 5 against an
-  environment that peers only to `^4.0.0`. Use `npx npm@11 install`.
-- vitest is pinned to 4.x because `vitest-environment-clarinet@3.0.2` does not
-  support vitest 5 yet.
-- Read-only calls do not report costs, so measuring a read-only needs a public
-  wrapper. There is no `cost-probe.clar` in the tree right now; re-add one if
-  you need to regenerate the cost table.
-- sBTC needs no mock. `Clarinet.toml` names `SM3VDXK3...sbtc-deposit` in
-  `[[project.requirements]]`, which makes Clarinet preload every wallet with
-  the `sbtc_balance` from `settings/Devnet.toml`. Tests never mint.
+  properties of null (reading 'edgesOut')`. Do NOT use `--legacy-peer-deps`;
+  it hides the crash and installs vitest 5 against an environment that peers
+  only to `^4.0.0`. Use `npx npm@11 install`.
+- vitest pinned to 4.x for the same reason.
+- Bitcoin: pass the **non-witness** serialization. The txid is computed over it;
+  the segwit encoding hashes to the wtxid and will never match a merkle proof.
+  `scripts/spv/build-proof.mjs` strips it and asserts the result.
+- Bitcoin reports hashes **reversed**. `get-burn-block-info?` returns display
+  order; `sha256d(header)` is internal order. See below.
 
 ## Contracts
 
 | file | role | deployed? |
 |---|---|---|
-| `at-stake.clar` | market, escrow, both resolvers | yes |
+| `at-stake.clar` | market, escrow, both resolvers | yes, as `at-stake-v3` |
 | `btc-parse.clar` | Bitcoin tx parsing, P2WSH lockup checks | yes |
 | `pox5-sim.clar` | the REAL pox-5, ours so we hold bond-admin | no, simnet only |
 | `test-signer-manager.clar` | `signer-manager-trait` impl | no, simnet only |
 
-Real pox-5 IS drivable in simnet: see `build-pox5-sim.sh`. grant-signer-key ->
-register-signer -> setup-bond -> register-for-bond writes a genuine membership
-row, and `resolve.test.js` uses exactly that.
-
-What the deployed contract calls, and nothing else:
-
-| dependency | id |
-|---|---|
-| sBTC | `SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token` |
-| pox-5 | `ST000000000000000000002AMW42H.pox-5` |
-
-`btc-parse.clar` has no external dependencies at all.
-
-### No mocks
-
 `resolve.test.js` drives real pox-5: grant-signer-key -> register-signer ->
-setup-bond -> register-for-bond. The only reason `pox5-sim` is generated rather
-than used as-is is the burn-header assert.
-
-The only writer of `protocol-bond-memberships` in real pox-5 is
-`register-for-bond`, which runs `verify-l1-lockups` -> `verify-block-header`:
-
-```clarity
-(match (get-burn-block-info? header-hash expected-block-height)
-    bhh (is-eq bhh (reverse-buff32 (sha256 (sha256 headerbuff))))
-    false
-```
-
-Same check as `tx-was-mined`, same simnet failure: synthetic burn blocks that
-no real Bitcoin header hashes to. Registration is also allowlist-gated by the
-bond admin and moves real sBTC via `roll-sbtc`. So real pox-5 returns `none`
-forever unless that one assert is bypassed. `build-pox5-sim.sh` bypasses it and
-nothing else. **Never let `pox5-sim` reach `at-stake.clar`.**
-
-Clarity has no loops. All Bitcoin scanning is `fold` over a fixed index list
-with a cursor in the accumulator, and a `done` flag instead of early exit.
-`IDX` caps at 10, matching pox-5's own 10-output cap.
+setup-bond -> register-for-bond writes a genuine membership row.
 
 ## The six checks in `resolve-bonded`
 
 1. Open, inside the window
-2. Lockup tx really in a Bitcoin block (SPV merkle against the burn header)
-3. It spends coins committed at create time — **pox-5 does not do this**, and
-   it is the only reason a market can be about a Bitcoin wallet
-4. Coins landed in a P2WSH whose witness script embeds
+2. **The lockup was mined AFTER the market opened.** Without this a creator can
+   open a market on coins already bonded, sell the IDLE side, and settle YES
+   immediately. That is a lookup, not a prediction.
+3. Both the lockup and its funding transaction are on Bitcoin (two SPV proofs)
+4. The funding output pays this market's script, and the lockup spends it —
+   **pox-5 does not check this**, and it is the only reason a market can be
+   about a Bitcoin wallet
+5. Coins landed in a P2WSH whose witness script embeds
    `sha256d(to-consensus-buff?(staker))` at a caller-stated offset, above threshold
-5. pox-5 says that staker holds a live bond at this bond-index
-6. `is-l1-lock` true. sBTC bonds resolve NO; v1 is native L1 only
+6. pox-5 reports a live membership with `is-l1-lock` and enough sats
 
 Every one has a rejection test. Keep it that way.
 
+**There is deliberately no bond-index check.** A staker holds one membership at
+a time and a rollover rewrites the index, so pinning it broke true outcomes and
+handed the creator a lever that could only be used to rig.
+
+## What mainnet taught us
+
+**The header byte-order bug.** `get-burn-block-info?` returns display order,
+`sha256d(header)` is internal order. v1 compared them directly, so it could
+never verify a Bitcoin block — `create-market` and `resolve-bonded` were both
+dead. All 58 tests passed throughout, because `SIM-SKIP-HEADER` bypasses exactly
+that assert. Found by the first real mainnet transaction, `ERR_BAD_HEADER`.
+
+`tests/header.test.js` now pins it against a real mainnet block with no chain
+required. **Wherever a harness skips a check, treat the skipped code as broken
+until something proves otherwise.**
+
+**The front-running hole.** v2 accepted a lockup from any past block, so the
+first market we ever settled YES was one whose answer already existed. Fixed by
+`created-at` in v3.
+
 ## Known gaps, in priority order
 
-1. ~~Lockup script template not pinned.~~ **Done.** `tests/template.test.js`
-   pins `btc-parse` to pox-5's real `construct-lockup-script`. Commitment sits
-   at byte offset 13.
-2. **Header binding untested.** `get-burn-block-info?` returns synthetic burn
-   blocks in simnet, so `SIM-SKIP-HEADER` bypasses the check that the supplied
-   80 bytes hash to the burn block the chain agreed on. Only testable on testnet.
-3. **sBTC contract id for testnet** must be confirmed or deploy fails static
-   analysis. Prefer `clarinet requirements add
-   SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-deposit`, which pulls the real
-   contracts and auto-funds simnet wallets, replacing `mock-sbtc` entirely.
-4. **Late resolution.** `get-bond-membership` returns none once a bond's unlock
-   cycle is reached, and a rollover overwrites `bondIndex`. Set `close-height`
-   to the bond start, not the registration cutoff: registration is blocked in
-   the final 100-block prepare phase, so that gap is a free grace window.
-5. **Snapshot timing is gameable.** `market-id = hash(script || bond-index)` but
-   the snapshot is whatever the first creator saw. Either fix the snapshot to a
-   stated burn height in the id, or print it on the page.
-6. **No AMM.** Trading is OTC-only via `transfer-shares`.
-7. **Early exit unwritten.** `announce-l1-early-exit` before close needs a
-   written YES or NO in the market terms and a matching branch.
+1. **No AMM.** Trading is OTC via `transfer-shares`. This is the real reason
+   there is no market yet. Polymarket and Kalshi both use a CLOB rather than an
+   AMM, and the complete-set identity (1 YES + 1 NO = 1 sat) lets an order book
+   mirror opposite-side orders to double depth. That is the shape to copy.
+2. **`close-height` is not tied to the bond's start.** `get-bond-membership`
+   returns none once the unlock cycle is reached, so a true L1 lock can become
+   unprovable before anyone settles.
+3. **The threshold is checked against one output, pox-5 sums up to ten.** A bond
+   split across outputs can satisfy pox-5 and fail check 5.
+4. **Losing shares never leave `idle-circ`/`bonded-circ`** if the holder never
+   redeems. Accounting dust, no fund risk.
+5. **`transfer-shares` accepts contract principals** that may never redeem.
+6. **No early-exit branch** for `announce-l1-early-exit`.
+7. **No external audit.**
 
-## Costs, already measured
+## Costs
 
-Against a 5,000,000,000 runtime block limit: merkle 12-deep 44,557; 10-input
-spend detection 828,466; 10-output extraction 1,205,416. A full resolve is
-~0.042% of a block, so roughly 2,400 would fit in one. **The fully on-chain
-resolver is affordable. Do not add a challenge-window fallback "for cost."**
-
-These predate the current tree and cannot be regenerated until a cost-probe
-contract is re-added.
+Historical, from wrappers no longer in the tree: merkle 12-deep 44,557; 10-input
+spend detection 828,466; 10-output extraction 1,205,416, against a 5e9 block
+limit. v3 adds a second SPV proof, so a full resolve is roughly double v2's
+~2.1M — still well under 0.1% of a block. **The fully on-chain resolver is
+affordable. Do not add a challenge-window fallback "for cost."**
