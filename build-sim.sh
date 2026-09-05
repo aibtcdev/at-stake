@@ -25,16 +25,18 @@ sed -e "s|'SP000000000000000000002Q6VF78.pox-5|'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZ
 cat >> contracts/at-stake-sim.clar <<'SIM'
 
 ;; ===== SIMNET ONLY. Not present in the deployed contract. =====
-(define-public (test-seed-market (id (buff 32)) (script (buff 34)) (bond-index uint)
-                                 (close-height uint) (threshold-sats uint) (snapshot-sats uint))
+(define-public (test-seed-market (id uint) (title (string-ascii 64))
+                                 (subject-script (buff 34)) (close-height uint)
+                                 (created-at uint) (threshold-sats uint) (snapshot-sats uint))
   (begin
     (map-set markets { id: id }
-      { script: script, bond-index: bond-index, close-height: close-height,
-        threshold-sats: threshold-sats, snapshot-sats: snapshot-sats,
-        status: STATUS_OPEN, vault: u0, idle-circ: u0, bonded-circ: u0 })
+      { title: title, subject-script: subject-script, close-height: close-height,
+        created-at: created-at, threshold-sats: threshold-sats,
+        snapshot-sats: snapshot-sats, status: STATUS_OPEN,
+        vault: u0, idle-circ: u0, bonded-circ: u0 })
     (ok true)))
 
-(define-public (test-set-bonded (id (buff 32)))
+(define-public (test-set-bonded (id uint))
   (let ((m (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET)))
     (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
     (ok true)))

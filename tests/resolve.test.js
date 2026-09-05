@@ -104,13 +104,26 @@ const snapTx = ser({
 });
 const SNAP_TXID = sha256d(snapTx);
 
-function createMarket(id, closeHeight = 500, threshold = THRESHOLD, bondIndex = BOND_INDEX) {
+// create-market assigns the id itself and returns it. Terms are
+// (script, close-height, threshold), so distinct markets need distinct terms --
+// varying close-height is enough.
+function createMarketRaw(closeHeight, threshold = THRESHOLD, title = "will it bond") {
   const b = inBlock(snapTx);
   return simnet.callPublicFn(C, "create-market", [
-    Cl.buffer(id), Cl.buffer(WALLET_SPK), Cl.uint(bondIndex), Cl.uint(closeHeight),
-    Cl.uint(threshold), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
+    Cl.stringAscii(title), Cl.buffer(WALLET_SPK),
+    Cl.uint(closeHeight), Cl.uint(threshold),
+    Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
     Cl.buffer(b.header), Cl.uint(b.index), Cl.list(b.path.map((x) => Cl.buffer(x))),
   ], alice);
+}
+
+let closeSeq = 500;
+function createMarket(closeHeight = ++closeSeq, threshold = THRESHOLD) {
+  const r = createMarketRaw(closeHeight, threshold);
+  // A bond only counts if it lands AFTER the market opened, so give the chain
+  // a block. Without this every resolve is ERR_BOND_TOO_EARLY.
+  simnet.mineEmptyBurnBlocks(1);
+  return { r, id: r.result.type === "ok" ? Number(r.result.value.value) : null };
 }
 
 // Set up a real bond in pox-5 and remember the unlock height its lockup script
@@ -139,13 +152,26 @@ function buildLockup(sats = SNAP_SATS, stakerPrincipal = staker, prevTxid = SNAP
   return { tx, script: witness, offset, block: inSoloBlock(tx) };
 }
 
-function resolveBonded(id, lk, who = bob, stakerPrincipal = staker) {
+// The funding proof: snapTx pays WALLET_SPK at output 0, and the lockup spends
+// it. That is what proves the bonded coins came from the subject's wallet
+// without naming one UTXO up front.
+function fundingProof() {
+  const b = inBlock(snapTx);
+  return { tx: snapTx, vout: 0, block: b };
+}
+
+function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight = null) {
+  const f = fundingProof();
+  const h = lockupHeight ?? simnet.burnBlockHeight;
   return simnet.callPublicFn(C, "resolve-bonded", [
-    Cl.buffer(id), Cl.principal(stakerPrincipal), Cl.buffer(lk.tx), Cl.uint(0),
-    Cl.uint(1), Cl.buffer(lk.block.header), Cl.uint(lk.block.index),
+    Cl.uint(id), Cl.principal(stakerPrincipal),
+    Cl.buffer(lk.tx), Cl.uint(0),
+    Cl.uint(h), Cl.buffer(lk.block.header), Cl.uint(lk.block.index),
     Cl.list(lk.block.path.map((x) => Cl.buffer(x))),
     Cl.buffer(lk.script), Cl.uint(lk.offset),
-    Cl.buffer(SNAP_TXID), Cl.uint(0),
+    Cl.buffer(f.tx), Cl.uint(f.vout),
+    Cl.uint(1), Cl.buffer(f.block.header), Cl.uint(f.block.index),
+    Cl.list(f.block.path.map((x) => Cl.buffer(x))),
   ], who);
 }
 
@@ -168,20 +194,37 @@ function setBond(isL1, sats, who = staker) {
 }
 
 const mktStatus = (id) => {
-  const r = simnet.callReadOnlyFn(C, "get-market", [Cl.buffer(id)], deployer);
+  const r = simnet.callReadOnlyFn(C, "get-market", [Cl.uint(id)], deployer);
   return r.result.type === 10 ? null : Number(r.result.value.value.status.value);
 };
 
-let n = 0;
-const freshId = () => new Uint8Array(32).fill(++n % 250 + 1);
 
 describe("create-market: proving the snapshot on chain", () => {
-  it("creates a market from a real proven UTXO", () => {
-    const id = freshId();
-    expect(createMarket(id).result).toBeOk(Cl.buffer(id));
-    const m = simnet.callReadOnlyFn(C, "get-market", [Cl.buffer(id)], deployer).result.value.value;
+  it("creates a market from a real proven UTXO and numbers it", () => {
+    const { r, id } = createMarket();
+    expect(r.result).toBeOk(Cl.uint(id));
+    const m = simnet.callReadOnlyFn(C, "get-market", [Cl.uint(id)], deployer).result.value.value;
     expect(Number(m["snapshot-sats"].value)).toBe(SNAP_SATS);
-    expect(Number(m["bond-index"].value)).toBe(BOND_INDEX);
+    expect(m.title.value).toBe("will it bond");
+    expect(Number(m["created-at"].value)).toBeLessThan(simnet.burnBlockHeight);
+  });
+
+  it("numbers markets sequentially", () => {
+    const a = createMarket();
+    const b = createMarket();
+    expect(b.id).toBe(a.id + 1);
+  });
+
+  it("REJECTS an empty title", () => {
+    expect(createMarketRaw(700, THRESHOLD, "").result).toBeErr(Cl.uint(112));
+  });
+
+  it("REJECTS a threshold above the snapshot -- YES must stay reachable", () => {
+    expect(createMarketRaw(701, SNAP_SATS + 1).result).toBeErr(Cl.uint(111));
+  });
+
+  it("REJECTS a zero threshold -- dust must not claim YES", () => {
+    expect(createMarketRaw(702, 0).result).toBeErr(Cl.uint(111));
   });
 
   it("REJECTS a zero-value snapshot output", () => {
@@ -191,7 +234,7 @@ describe("create-market: proving the snapshot on chain", () => {
     });
     const b = inBlock(small);
     const r = simnet.callPublicFn(C, "create-market", [
-      Cl.buffer(freshId()), Cl.buffer(WALLET_SPK), Cl.uint(BOND_INDEX), Cl.uint(500),
+      Cl.stringAscii("zero value"), Cl.buffer(WALLET_SPK), Cl.uint(710),
       Cl.uint(THRESHOLD), Cl.buffer(small), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.list(b.path.map((x) => Cl.buffer(x))),
     ], alice);
@@ -201,8 +244,8 @@ describe("create-market: proving the snapshot on chain", () => {
   it("REJECTS an output that pays a different wallet", () => {
     const b = inBlock(snapTx);
     const r = simnet.callPublicFn(C, "create-market", [
-      Cl.buffer(freshId()), Cl.buffer(p2wpkh(Buffer.alloc(20, 0x99))), Cl.uint(BOND_INDEX),
-      Cl.uint(500), Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
+      Cl.stringAscii("wrong wallet"), Cl.buffer(p2wpkh(Buffer.alloc(20, 0x99))),
+      Cl.uint(711), Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.list(b.path.map((x) => Cl.buffer(x))),
     ], alice);
     expect(r.result).toBeErr(Cl.uint(204));
@@ -212,41 +255,38 @@ describe("create-market: proving the snapshot on chain", () => {
     const b = inBlock(snapTx);
     const badPath = b.path.map(() => sha256d(Buffer.from("nope")));
     const r = simnet.callPublicFn(C, "create-market", [
-      Cl.buffer(freshId()), Cl.buffer(WALLET_SPK), Cl.uint(BOND_INDEX), Cl.uint(500),
+      Cl.stringAscii("forged proof"), Cl.buffer(WALLET_SPK), Cl.uint(712),
       Cl.uint(THRESHOLD), Cl.buffer(snapTx), Cl.uint(0), Cl.uint(1),
       Cl.buffer(b.header), Cl.uint(b.index), Cl.list(badPath.map((x) => Cl.buffer(x))),
     ], alice);
     expect(r.result).toBeErr(Cl.uint(201));
   });
 
-  it("REJECTS a duplicate market id", () => {
-    const id = freshId();
-    createMarket(id);
-    expect(createMarket(id).result).toBeErr(Cl.uint(100));
+  // The id is assigned, so duplicates are caught by the terms hash instead:
+  // same wallet, same deadline, same threshold is the same question.
+  it("REJECTS a second market with identical terms", () => {
+    createMarketRaw(720);
+    expect(createMarketRaw(720).result).toBeErr(Cl.uint(100));
+  });
+
+  it("allows the same wallet at a different deadline", () => {
+    expect(createMarketRaw(721).result.type).toBe("ok");
+    expect(createMarketRaw(722).result.type).toBe("ok");
   });
 });
 
 describe("resolve-bonded: the full YES claim", () => {
   it("resolves BONDED when every check passes", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     const lk = setBond(true, SNAP_SATS);
     expect(resolveBonded(id, lk).result).toBeOk(Cl.uint(1));
     expect(mktStatus(id)).toBe(1);
   });
 
   it("REJECTS an sBTC bond -- v1 is native L1 only", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     setBond(false, SNAP_SATS); // is-l1-lock: false
     expect(resolveBonded(id, buildLockup()).result).toBeErr(Cl.uint(207));
-  });
-
-  it("REJECTS a bond for a different bond-index", () => {
-    const id = freshId();
-    createMarket(id, 500, THRESHOLD, BOND_INDEX + 1);
-    const lk = setBond(true, SNAP_SATS);
-    expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(208));
   });
 
   // pox-5 derives amount-sats from the lockup transaction itself, so a staker
@@ -254,8 +294,7 @@ describe("resolve-bonded: the full YES claim", () => {
   // bond a little of your own money and then point at somebody else's much
   // larger snapshot. pox-5 is satisfied; check 6 is not.
   it("REJECTS a bond under the threshold", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     const idx = bondSetup();
     const OWN = sha256d(Buffer.from("the staker's own, smaller utxo"));
     const funded = buildLockup(50_000_000, staker, OWN); // 0.5 BTC really locked
@@ -268,15 +307,13 @@ describe("resolve-bonded: the full YES claim", () => {
   });
 
   it("REJECTS a staker with no pox-5 membership at all", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     bondSetup(); // a real bond exists, but this staker never registered for it
     expect(resolveBonded(id, buildLockup()).result).toBeErr(Cl.uint(206));
   });
 
   it("REJECTS a lockup that does not spend the snapshot coins", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     setBond(true, SNAP_SATS);
     const { witness, spk, offset } = lockupScriptFor(deployer, staker, UNLOCK);
     const unrelated = ser({
@@ -288,8 +325,7 @@ describe("resolve-bonded: the full YES claim", () => {
   });
 
   it("REJECTS a lookalike P2WSH bound to the wrong staker", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     setBond(true, SNAP_SATS);
     // a real pox-5 lockup script, but one that commits to bob, not the staker
     const { witness, spk, offset } = lockupScriptFor(deployer, bob, UNLOCK);
@@ -302,37 +338,33 @@ describe("resolve-bonded: the full YES claim", () => {
   });
 
   it("REJECTS a witness script that does not hash to the output", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     const lk = setBond(true, SNAP_SATS);
     lk.script = Buffer.concat([lk.script, Buffer.from([0x51])]); // one byte off
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(310));
   });
 
   it("REJECTS resolving after the window closed", () => {
-    const id = freshId();
-    createMarket(id, 260);
+    const { id } = createMarket(260);
     const lk = setBond(true, SNAP_SATS);
     simnet.mineEmptyBurnBlocks(300);
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(103));
   });
 
   it("cannot be resolved twice", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
     const lk = setBond(true, SNAP_SATS);
     resolveBonded(id, lk);
     expect(resolveBonded(id, lk).result).toBeErr(Cl.uint(102));
   });
 
   it("FULL LIFECYCLE: create, bet, resolve bonded, redeem", () => {
-    const id = freshId();
-    createMarket(id);
+    const { id } = createMarket();
 
     // Alice mints complete sets and sells her IDLE side to Bob at 68c.
-    simnet.callPublicFn(C, "mint-complete-set", [Cl.buffer(id), Cl.uint(1_000_000)], alice);
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(id), Cl.uint(1_000_000)], alice);
     simnet.callPublicFn(C, "transfer-shares",
-      [Cl.buffer(id), Cl.uint(0), Cl.uint(1_000_000), Cl.principal(bob)], alice);
+      [Cl.uint(id), Cl.uint(0), Cl.uint(1_000_000), Cl.principal(bob)], alice);
 
     const lk = setBond(true, SNAP_SATS);
     expect(resolveBonded(id, lk).result).toBeOk(Cl.uint(1));
@@ -340,10 +372,10 @@ describe("resolve-bonded: the full YES claim", () => {
     // Alice held BONDED and was right.
     const before = Number(simnet.callReadOnlyFn(SBTC, "get-balance",
       [Cl.principal(alice)], deployer).result.value.value);
-    expect(simnet.callPublicFn(C, "redeem", [Cl.buffer(id)], alice).result).toBeOk(Cl.uint(1_000_000));
+    expect(simnet.callPublicFn(C, "redeem", [Cl.uint(id)], alice).result).toBeOk(Cl.uint(1_000_000));
     expect(Number(simnet.callReadOnlyFn(SBTC, "get-balance",
       [Cl.principal(alice)], deployer).result.value.value)).toBe(before + 1_000_000);
     // Bob's IDLE shares are worthless.
-    expect(simnet.callPublicFn(C, "redeem", [Cl.buffer(id)], bob).result).toBeErr(Cl.uint(107));
+    expect(simnet.callPublicFn(C, "redeem", [Cl.uint(id)], bob).result).toBeErr(Cl.uint(107));
   });
 });

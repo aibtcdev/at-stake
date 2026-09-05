@@ -5,7 +5,7 @@ const deployer = simnet.getAccounts().get("deployer");
 const alice = simnet.getAccounts().get("wallet_1");
 const bob = simnet.getAccounts().get("wallet_2");
 const C = "at-stake-sim";
-const ID = new Uint8Array(32).fill(9);
+const ID = 1;
 const CLOSE = 300;
 const IDLE = 0, BONDED = 1;
 
@@ -17,17 +17,17 @@ const IDLE = 0, BONDED = 1;
 const SBTC = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token";
 
 const seed = () => simnet.callPublicFn(C, "test-seed-market", [
-  Cl.buffer(ID), Cl.buffer(new Uint8Array(34).fill(1)), Cl.uint(0),
-  Cl.uint(CLOSE), Cl.uint(100_000_000), Cl.uint(24_700_000_000)], deployer);
-const mint = (w, n) => simnet.callPublicFn(C, "mint-complete-set", [Cl.buffer(ID), Cl.uint(n)], w);
+  Cl.uint(ID), Cl.stringAscii("test market"), Cl.buffer(new Uint8Array(34).fill(1)),
+  Cl.uint(CLOSE), Cl.uint(0), Cl.uint(100_000_000), Cl.uint(24_700_000_000)], deployer);
+const mint = (w, n) => simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(n)], w);
 const xfer = (w, side, n, to) => simnet.callPublicFn(C, "transfer-shares",
-  [Cl.buffer(ID), Cl.uint(side), Cl.uint(n), Cl.principal(to)], w);
+  [Cl.uint(ID), Cl.uint(side), Cl.uint(n), Cl.principal(to)], w);
 const pos = (w) => {
-  const d = simnet.callReadOnlyFn(C, "get-position", [Cl.buffer(ID), Cl.principal(w)], deployer).result.value;
+  const d = simnet.callReadOnlyFn(C, "get-position", [Cl.uint(ID), Cl.principal(w)], deployer).result.value;
   return { idle: Number(d.idle.value), bonded: Number(d.bonded.value) };
 };
 const mkt = () => {
-  const d = simnet.callReadOnlyFn(C, "get-market", [Cl.buffer(ID)], deployer).result.value.value;
+  const d = simnet.callReadOnlyFn(C, "get-market", [Cl.uint(ID)], deployer).result.value.value;
   return { vault: Number(d.vault.value), idle: Number(d["idle-circ"].value), bonded: Number(d["bonded-circ"].value) };
 };
 const sbtc = (w) => Number(simnet.callReadOnlyFn(SBTC,"get-balance",[Cl.principal(w)],deployer).result.value.value);
@@ -58,7 +58,7 @@ describe("share transfer -- the thing that makes a price", () => {
   it("rejects an unknown side", () => {
     mint(alice, 100);
     expect(simnet.callPublicFn(C, "transfer-shares",
-      [Cl.buffer(ID), Cl.uint(7), Cl.uint(10), Cl.principal(bob)], alice).result).toBeErr(Cl.uint(109));
+      [Cl.uint(ID), Cl.uint(7), Cl.uint(10), Cl.principal(bob)], alice).result).toBeErr(Cl.uint(109));
   });
 
   it("rejects transfer to yourself", () => {
@@ -69,7 +69,7 @@ describe("share transfer -- the thing that makes a price", () => {
   it("rejects transfer after the market resolves", () => {
     mint(alice, 100);
     simnet.mineEmptyBurnBlocks(CLOSE + 5);
-    simnet.callPublicFn(C, "resolve-idle", [Cl.buffer(ID)], bob);
+    simnet.callPublicFn(C, "resolve-idle", [Cl.uint(ID)], bob);
     expect(xfer(alice, IDLE, 10, bob).result).toBeErr(Cl.uint(102));
   });
 
@@ -84,14 +84,14 @@ describe("share transfer -- the thing that makes a price", () => {
 
     // Window closes with no bond registered.
     simnet.mineEmptyBurnBlocks(CLOSE + 5);
-    simnet.callPublicFn(C, "resolve-idle", [Cl.buffer(ID)], bob);
+    simnet.callPublicFn(C, "resolve-idle", [Cl.uint(ID)], bob);
 
     const aBefore = sbtc(alice);
-    expect(simnet.callPublicFn(C, "redeem", [Cl.buffer(ID)], alice).result).toBeOk(Cl.uint(1_000_000));
+    expect(simnet.callPublicFn(C, "redeem", [Cl.uint(ID)], alice).result).toBeOk(Cl.uint(1_000_000));
     expect(sbtc(alice)).toBe(aBefore + 1_000_000);
     // Alice: paid 1,000,000 to mint, received 320,000 from Bob, redeemed
     // 1,000,000. Net +320,000. Bob's bonded shares are worthless.
-    expect(simnet.callPublicFn(C, "redeem", [Cl.buffer(ID)], bob).result).toBeErr(Cl.uint(107));
+    expect(simnet.callPublicFn(C, "redeem", [Cl.uint(ID)], bob).result).toBeErr(Cl.uint(107));
     expect(mkt().vault).toBe(0);
   });
 
@@ -103,9 +103,9 @@ describe("share transfer -- the thing that makes a price", () => {
     expect(sbtc(`${deployer}.${C}`)).toBe(5_000_000);
 
     simnet.mineEmptyBurnBlocks(CLOSE + 5);
-    simnet.callPublicFn(C, "resolve-idle", [Cl.buffer(ID)], bob);
-    simnet.callPublicFn(C, "redeem", [Cl.buffer(ID)], alice);
-    simnet.callPublicFn(C, "redeem", [Cl.buffer(ID)], bob);
+    simnet.callPublicFn(C, "resolve-idle", [Cl.uint(ID)], bob);
+    simnet.callPublicFn(C, "redeem", [Cl.uint(ID)], alice);
+    simnet.callPublicFn(C, "redeem", [Cl.uint(ID)], bob);
     expect(sbtc(`${deployer}.${C}`)).toBe(0);
     expect(mkt().vault).toBe(0);
   });
