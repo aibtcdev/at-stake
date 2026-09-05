@@ -40,14 +40,16 @@ const sbtc = (who) =>
   Number(simnet.callReadOnlyFn(SBTC, "get-balance", [Cl.principal(who)], deployer).result.value.value);
 
 // Ask the contract for the hash, so the test cannot disagree with it.
-function hashOf(side, amount, price, nonce, expiry) {
+function hashOf(side, amount, price, nonce, expiry, sellerP = seller) {
   return simnet.callReadOnlyFn(C, "order-hash", [
-    Cl.uint(ID), Cl.uint(side), Cl.uint(amount), Cl.uint(price), Cl.uint(nonce), Cl.uint(expiry),
+    Cl.principal(sellerP), Cl.uint(ID), Cl.uint(side), Cl.uint(amount),
+    Cl.uint(price), Cl.uint(nonce), Cl.uint(expiry),
   ], deployer).result.value;
 }
 
-function signedOrder({ side = IDLE, amount = 100, price = 68, nonce = 1, expiry = 9999, signer = "wallet_1" } = {}) {
-  const h = hashOf(side, amount, price, nonce, expiry);
+function signedOrder({ side = IDLE, amount = 100, price = 68, nonce = 1, expiry = 9999,
+                       signer = "wallet_1", sellerP = seller } = {}) {
+  const h = hashOf(side, amount, price, nonce, expiry, sellerP);
   const sig = signMessageHashRsv({ messageHash: h, privateKey: key(signer) });
   return { side, amount, price, nonce, expiry, sig, hash: h };
 }
@@ -88,7 +90,7 @@ describe("fill-order: settling an off-chain order", () => {
   });
 
   it("REJECTS a signature from somebody else", () => {
-    const o = signedOrder({ signer: "wallet_3" }); // not the seller
+    const o = signedOrder({ signer: "wallet_3" }); // hash names the seller, key does not
     expect(fill(o).result).toBeErr(Cl.uint(113));
   });
 
@@ -261,5 +263,53 @@ describe("the minimum-fill guard", () => {
   it("a tiny order is fillable in one go", () => {
     const o = signedOrder({ amount: 5, price: 4, nonce: 34 });
     expect(fill(o, buyer, seller, 5).result).toBeOk(Cl.uint(5));
+  });
+});
+
+
+describe("two sellers offering identical terms", () => {
+  it("do not share a fill counter", () => {
+    // Before the seller was in the hash, both orders hashed the same, so
+    // filling one marked the other spent -- a free way to kill someone's offer.
+    seed();
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(1_000)], seller);
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(1_000)], buyer);
+    const carol = accounts.get("wallet_3"), dave = accounts.get("wallet_4");
+
+    const fromSeller = signedOrder({ nonce: 1 });
+    const fromBuyer  = signedOrder({ nonce: 1, signer: "wallet_2", sellerP: buyer });
+    expect(fromSeller.hash).not.toBe(fromBuyer.hash);
+
+    expect(fill(fromSeller, carol, seller).result).toBeOk(Cl.uint(100));
+    expect(fill(fromBuyer,  dave,  buyer ).result).toBeOk(Cl.uint(100));
+  });
+});
+
+describe("the gap between the deadline and resolve-idle", () => {
+  // Past close-height nobody has bonded, so IDLE has certainly won -- but the
+  // market only flips to IDLE when somebody bothers to call resolve-idle.
+  // Trading in that gap is buying a known winner off whoever left an order up.
+  beforeEach(() => {
+    seed();
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(1_000)], seller);
+  });
+
+  it("REFUSES to fill an order once the deadline has passed", () => {
+    const o = signedOrder({ nonce: 41 });
+    simnet.mineEmptyBurnBlocks(CLOSE + 10);
+    expect(fill(o).result).toBeErr(Cl.uint(103));
+  });
+
+  it("REFUSES a plain transfer once the deadline has passed", () => {
+    simnet.mineEmptyBurnBlocks(CLOSE + 10);
+    expect(simnet.callPublicFn(C, "transfer-shares",
+      [Cl.uint(ID), Cl.uint(IDLE), Cl.uint(10), Cl.principal(buyer)], seller).result)
+      .toBeErr(Cl.uint(103));
+  });
+
+  it("still lets you merge out -- handing back a pair cannot be gamed", () => {
+    simnet.mineEmptyBurnBlocks(CLOSE + 10);
+    expect(simnet.callPublicFn(C, "merge-complete-set",
+      [Cl.uint(ID), Cl.uint(500)], seller).result).toBeOk(Cl.uint(500));
   });
 });

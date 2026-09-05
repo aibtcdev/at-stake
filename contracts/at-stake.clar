@@ -232,6 +232,9 @@
     (asserts! (not (is-eq to from)) ERR_SELF_TRANSFER)
     (asserts! (or (is-eq side SIDE_IDLE) (is-eq side SIDE_BONDED)) ERR_BAD_SIDE)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
+    ;; Past the deadline the answer is settled even if nobody has called
+    ;; resolve-idle yet. Trading in that gap is buying a known outcome.
+    (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     (if (is-eq side SIDE_IDLE)
         (begin
           (asserts! (>= (get idle src) amount) ERR_NO_POSITION)
@@ -246,15 +249,22 @@
 
 ;; What a seller signs. Nothing here is secret: the buyer needs every field to
 ;; reconstruct the hash, and the signature is what makes it binding.
-;; `contract` is a domain separator. Without it a signature is equally valid on
+;; The hash does two jobs, and both dictate what has to be in it.
+;;
+;; It is what the seller signs, so tampering with any term breaks the signature.
+;; It is also the order's identity in `filled-orders`, so it must be unique to
+;; ONE order -- omit the seller and two people signing the same terms share a
+;; fill counter, and the first fill kills the other's offer.
+;;
+;; `contract` is a domain separator: without it a signature is equally valid on
 ;; any other deployment carrying this function, so an old order could be
-;; replayed against a fork or a later version to take shares at a stale price.
+;; replayed against a fork to take shares at a stale price.
 (define-read-only (order-hash
-                    (id uint) (side uint) (amount uint)
+                    (seller principal) (id uint) (side uint) (amount uint)
                     (price-sats uint) (nonce uint) (expiry uint))
   (sha256 (unwrap-panic (to-consensus-buff?
-    { contract: current-contract, market: id, side: side, amount: amount,
-      price: price-sats, nonce: nonce, expiry: expiry }))))
+    { contract: current-contract, seller: seller, market: id, side: side,
+      amount: amount, price: price-sats, nonce: nonce, expiry: expiry }))))
 
 (define-read-only (get-order-floor (seller principal))
   (default-to u0 (get min-nonce (map-get? order-floor { seller: seller }))))
@@ -305,7 +315,7 @@
                  (seller principal) (signature (buff 65))
                  (fill-amount uint))
   (let ((m         (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (hash      (order-hash id side amount price-sats nonce expiry))
+        (hash      (order-hash seller id side amount price-sats nonce expiry))
         (buyer     tx-sender)
         (src       (get-position id seller))
         (dst       (get-position id tx-sender))
@@ -324,6 +334,9 @@
     (asserts! (not (is-eq seller buyer)) ERR_SELF_TRANSFER)
     (asserts! (or (is-eq side SIDE_IDLE) (is-eq side SIDE_BONDED)) ERR_BAD_SIDE)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
+    ;; Same gap as transfer-shares: an unresolved market past its deadline has
+    ;; a certain outcome, so a stale order there is free money for the buyer.
+    (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
     (asserts! (<= burn-block-height expiry) ERR_ORDER_EXPIRED)
     (asserts! (>= nonce (get-order-floor seller)) ERR_ORDER_CANCELLED)
     ;; the order is only an order if the seller actually signed it
