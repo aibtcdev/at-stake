@@ -153,10 +153,6 @@ function buildLockup(sats = SNAP_SATS, stakerPrincipal = staker, prevTxid = SNAP
 // The funding proof: snapTx pays WALLET_SPK at output 0, and the lockup spends
 // it. That is what proves the bonded coins came from the subject's wallet
 // without naming one UTXO up front.
-function fundingProof(tx = snapTx, vout = 0) {
-  return { tx, vout, block: inBlock(tx) };
-}
-
 // A second coin paying the same wallet. Real, mined, and NOT in the photo
 // unless somebody commits it with add-snapshot.
 const otherCoinTx = ser({
@@ -176,7 +172,8 @@ function addSnapshot(id, tx = otherCoinTx, vout = 0, height = 1, who = alice) {
 
 function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight = null,
                        opts = {}) {
-  const f = fundingProof(opts.fundingTx ?? snapTx, opts.fundingVout ?? 0);
+  const fundingTxid = opts.fundingTxid ?? SNAP_TXID;
+  const fundingVout = opts.fundingVout ?? 0;
   const h = lockupHeight ?? simnet.burnBlockHeight;
   const unlock = opts.unlock ?? UNLOCK;
   const unlockBytes = opts.unlockBytes ?? STAKER_UNLOCK_BYTES;
@@ -186,9 +183,7 @@ function resolveBonded(id, lk, who = bob, stakerPrincipal = staker, lockupHeight
     Cl.buffer(lk.tx), Cl.uint(0),
     Cl.uint(h), Cl.buffer(lk.block.header), Cl.uint(lk.block.index),
     Cl.uint(lk.block.count), Cl.list(lk.block.path.map((x) => Cl.buffer(x))),
-    Cl.buffer(f.tx), Cl.uint(f.vout),
-    Cl.uint(1), Cl.buffer(f.block.header), Cl.uint(f.block.index),
-    Cl.uint(f.block.count), Cl.list(f.block.path.map((x) => Cl.buffer(x))),
+    Cl.buffer(fundingTxid), Cl.uint(fundingVout),
   ], who);
 }
 
@@ -463,7 +458,7 @@ describe("resolve-bonded: the full YES claim", () => {
     const { id } = createMarket();
     const lk = setBond(true, SNAP_SATS, staker, OTHER_COIN_TXID);
     expect(resolveBonded(id, lk, bob, staker, null,
-      { fundingTx: otherCoinTx, fundingVout: 0 }).result).toBeErr(Cl.uint(122));
+      { fundingTxid: OTHER_COIN_TXID, fundingVout: 0 }).result).toBeErr(Cl.uint(122));
   });
 
   it("SETTLES once that same coin is committed with add-snapshot", () => {
@@ -471,7 +466,7 @@ describe("resolve-bonded: the full YES claim", () => {
     expect(addSnapshot(id).result.type).toBe("ok");
     const lk = setBond(true, SNAP_SATS, staker, OTHER_COIN_TXID);
     expect(resolveBonded(id, lk, bob, staker, null,
-      { fundingTx: otherCoinTx, fundingVout: 0 }).result).toBeOk(Cl.uint(1));
+      { fundingTxid: OTHER_COIN_TXID, fundingVout: 0 }).result).toBeOk(Cl.uint(1));
   });
 
   it("REJECTS a real pox-5 lockup built for a later unlock height", () => {
