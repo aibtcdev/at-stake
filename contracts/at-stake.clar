@@ -471,6 +471,9 @@
       (asserts! (is-eq (get bond-index mem) bidx) ERR_NO_MEMBERSHIP)
       (asserts! (get is-l1-lock mem) ERR_NOT_L1)
       (asserts! (>= (get amount-sats mem) (get threshold-sats m)) ERR_BELOW_THRESHOLD)
+      ;; a real lockup output is part of what pox-5 credited this staker, never
+      ;; more. Bounds a borrowed bond to its own size.
+      (asserts! (<= (get amount lockup) (get amount-sats mem)) ERR_BELOW_THRESHOLD)
       (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
       (print { event: "resolve", id: id, outcome: "bonded", staker: staker,
                bond-index: bidx, sats: (get amount-sats mem),
