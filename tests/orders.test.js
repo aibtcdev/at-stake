@@ -52,12 +52,20 @@ function signedOrder({ side = IDLE, amount = 100, price = 68, nonce = 1, expiry 
   return { side, amount, price, nonce, expiry, sig, hash: h };
 }
 
-const fill = (o, who = buyer, sellerP = seller) =>
+const fill = (o, who = buyer, sellerP = seller, fillAmount = null) =>
   simnet.callPublicFn(C, "fill-order", [
     Cl.uint(ID), Cl.uint(o.side), Cl.uint(o.amount), Cl.uint(o.price),
     Cl.uint(o.nonce), Cl.uint(o.expiry), Cl.principal(sellerP),
     Cl.buffer(Buffer.from(String(o.sig).replace(/^0x/, ""), "hex")),
+    Cl.uint(fillAmount ?? o.amount),
   ], who);
+
+const filledSoFar = (o) =>
+  Number(simnet.callReadOnlyFn(C, "order-filled",
+    [Cl.buffer(Buffer.from(String(o.hash).replace(/^0x/, ""), "hex"))], deployer).result.value);
+const priceFor = (o, n) =>
+  Number(simnet.callReadOnlyFn(C, "fill-price",
+    [Cl.uint(o.price), Cl.uint(o.amount), Cl.uint(n)], deployer).result.value);
 
 describe("fill-order: settling an off-chain order", () => {
   beforeEach(() => {
@@ -89,7 +97,7 @@ describe("fill-order: settling an off-chain order", () => {
     expect(fill({ ...o, price: 1 }).result).toBeErr(Cl.uint(113));
   });
 
-  it("REJECTS the same order twice", () => {
+  it("REJECTS taking more than is left", () => {
     const o = signedOrder();
     expect(fill(o).result).toBeOk(Cl.uint(100));
     expect(fill(o).result).toBeErr(Cl.uint(115));
@@ -159,5 +167,99 @@ describe("the order hash is bound to this contract", () => {
     const naive = createHash("sha256").update(Buffer.from("no-domain-separator")).digest("hex");
     expect(withContract).not.toBe(naive);
     expect(withContract).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+
+describe("partial fills", () => {
+  beforeEach(() => {
+    seed();
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(5_000)], seller);
+  });
+
+  it("a buyer can take a slice and leave the rest", () => {
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 11 });
+    expect(fill(o, buyer, seller, 300).result).toBeOk(Cl.uint(300));
+    expect(pos(buyer).idle).toBe(300);
+    expect(filledSoFar(o)).toBe(300);
+  });
+
+  it("several buyers can share one order until it is exhausted", () => {
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 12 });
+    expect(fill(o, buyer, seller, 400).result).toBeOk(Cl.uint(400));
+    expect(fill(o, accounts.get("wallet_3"), seller, 600).result).toBeOk(Cl.uint(600));
+    expect(filledSoFar(o)).toBe(1_000);
+    // and now there is nothing left
+    expect(fill(o, accounts.get("wallet_4"), seller, 1).result).toBeErr(Cl.uint(115));
+  });
+
+  it("REJECTS taking more than remains", () => {
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 13 });
+    fill(o, buyer, seller, 900);
+    expect(fill(o, buyer, seller, 200).result).toBeErr(Cl.uint(118));
+  });
+
+  it("charges pro-rata, and the buyer pays it", () => {
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 14 });
+    const before = sbtc(seller);
+    fill(o, buyer, seller, 500);
+    expect(sbtc(seller) - before).toBe(340);       // half of 680
+  });
+});
+
+describe("the rounding must favour the seller", () => {
+  beforeEach(() => {
+    seed();
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(5_000)], seller);
+  });
+
+  it("one share of a 1000-share order is NOT free", () => {
+    // floor division would make this 680 * 1 / 1000 = 0, and the whole order
+    // could then be taken apart for nothing.
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 21 });
+    expect(priceFor(o, 1)).toBe(1);
+    expect(priceFor(o, 1)).toBeGreaterThan(0);
+  });
+
+  it("a fraction always rounds up, never down", () => {
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 22 });
+    expect(priceFor(o, 3)).toBe(3);      // 2.04 -> 3
+    expect(priceFor(o, 100)).toBe(68);   // exact stays exact
+    expect(priceFor(o, 999)).toBe(680);  // 679.32 -> 680
+  });
+
+  it("the whole order still costs exactly the asking price", () => {
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 23 });
+    expect(priceFor(o, 1_000)).toBe(680);
+  });
+});
+
+describe("the minimum-fill guard", () => {
+  beforeEach(() => {
+    seed();
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(ID), Cl.uint(5_000)], seller);
+  });
+
+  it("REJECTS a nibble far below the floor", () => {
+    // 1% of 1000 is 10, so a single share is grief, not a trade
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 31 });
+    expect(fill(o, buyer, seller, 1).result).toBeErr(Cl.uint(117));
+  });
+
+  it("accepts exactly the floor", () => {
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 32 });
+    expect(fill(o, buyer, seller, 10).result).toBeOk(Cl.uint(10));
+  });
+
+  it("lets the tail be cleared however small it is", () => {
+    // otherwise the last few shares of every order would be stranded
+    const o = signedOrder({ amount: 1_000, price: 680, nonce: 33 });
+    fill(o, buyer, seller, 995);
+    expect(fill(o, accounts.get("wallet_3"), seller, 5).result).toBeOk(Cl.uint(5));
+  });
+
+  it("a tiny order is fillable in one go", () => {
+    const o = signedOrder({ amount: 5, price: 4, nonce: 34 });
+    expect(fill(o, buyer, seller, 5).result).toBeOk(Cl.uint(5));
   });
 });

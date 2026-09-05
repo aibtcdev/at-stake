@@ -35,6 +35,13 @@
 (define-constant ERR_ORDER_EXPIRED      (err u114))
 (define-constant ERR_ORDER_FILLED       (err u115))
 (define-constant ERR_ORDER_CANCELLED    (err u116))
+(define-constant ERR_FILL_TOO_SMALL     (err u117))
+(define-constant ERR_FILL_TOO_LARGE     (err u118))
+
+;; Smallest slice of an order anyone may take. Without a floor, a griefer can
+;; chew an order away one share at a time, each nibble costing the book a state
+;; write and the seller a fee-bearing settlement.
+(define-constant MIN_FILL_BPS u100) ;; 1% of the order
 
 ;; Markets are numbered, so a UI can say "#7" instead of a hash.
 (define-data-var next-market-id uint u1)
@@ -63,7 +70,7 @@
 
 ;; Signed orders are one-shot. Filling one records its hash so it cannot be
 ;; replayed against the seller.
-(define-map filled-orders { hash: (buff 32) } { filled-by: principal })
+(define-map filled-orders { hash: (buff 32) } { filled: uint })
 
 ;; A seller's nonce floor. Orders signed below it are dead, so one transaction
 ;; revokes every outstanding offer without having to name them.
@@ -263,7 +270,25 @@
     (ok min-nonce)))
 
 (define-read-only (order-filled (hash (buff 32)))
-  (map-get? filled-orders { hash: hash }))
+  (default-to u0 (get filled (map-get? filled-orders { hash: hash }))))
+
+;; What `fill-amount` of an order costs, rounded UP.
+;;
+;; Floor division is a theft path: 680 sats for 1000 shares makes one share
+;; cost (680 * 1 / 1000) = 0, so an order can be taken apart for nothing a
+;; share at a time. Rounding up puts the fraction on the buyer, where it
+;; belongs.
+(define-read-only (fill-price (price-sats uint) (amount uint) (fill-amount uint))
+  (if (is-eq amount u0)
+      u0
+      (/ (+ (* price-sats fill-amount) (- amount u1)) amount)))
+
+;; The smallest slice this order accepts. Always at least one share, and a
+;; final remainder is always fillable however small it is -- otherwise the tail
+;; of every order would be stranded.
+(define-read-only (min-fill-for (amount uint))
+  (let ((floor-amt (/ (* amount MIN_FILL_BPS) u10000)))
+    (if (> floor-amt u0) floor-amt u1)))
 
 ;; Settle an off-chain order on chain, both legs or neither.
 ;;
@@ -277,40 +302,52 @@
 (define-public (fill-order
                  (id uint) (side uint) (amount uint) (price-sats uint)
                  (nonce uint) (expiry uint)
-                 (seller principal) (signature (buff 65)))
-  (let ((m     (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
-        (hash  (order-hash id side amount price-sats nonce expiry))
-        (buyer tx-sender)
-        (src   (get-position id seller))
-        (dst   (get-position id tx-sender)))
+                 (seller principal) (signature (buff 65))
+                 (fill-amount uint))
+  (let ((m         (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET))
+        (hash      (order-hash id side amount price-sats nonce expiry))
+        (buyer     tx-sender)
+        (src       (get-position id seller))
+        (dst       (get-position id tx-sender))
+        (already   (order-filled hash))
+        (remaining (- amount (order-filled hash)))
+        (cost      (fill-price price-sats amount fill-amount)))
     (asserts! (> amount u0) ERR_ZERO)
+    (asserts! (> fill-amount u0) ERR_ZERO)
+    ;; "nothing left" is a clearer answer than "too much", so check it first
+    (asserts! (< already amount) ERR_ORDER_FILLED)
+    (asserts! (<= fill-amount remaining) ERR_FILL_TOO_LARGE)
+    ;; take at least the minimum, unless you are clearing the tail
+    (asserts! (or (>= fill-amount (min-fill-for amount))
+                  (is-eq fill-amount remaining))
+              ERR_FILL_TOO_SMALL)
     (asserts! (not (is-eq seller buyer)) ERR_SELF_TRANSFER)
     (asserts! (or (is-eq side SIDE_IDLE) (is-eq side SIDE_BONDED)) ERR_BAD_SIDE)
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height expiry) ERR_ORDER_EXPIRED)
     (asserts! (>= nonce (get-order-floor seller)) ERR_ORDER_CANCELLED)
-    (asserts! (is-none (map-get? filled-orders { hash: hash })) ERR_ORDER_FILLED)
     ;; the order is only an order if the seller actually signed it
     (asserts! (is-eq (unwrap! (principal-of? (unwrap! (secp256k1-recover? hash signature)
                                                       ERR_BAD_SIG))
                               ERR_BAD_SIG)
                      seller)
               ERR_BAD_SIG)
-    (map-set filled-orders { hash: hash } { filled-by: buyer })
+    (map-set filled-orders { hash: hash } { filled: (+ already fill-amount) })
     (if (is-eq side SIDE_IDLE)
         (begin
-          (asserts! (>= (get idle src) amount) ERR_NO_POSITION)
-          (map-set positions { id: id, who: seller } (merge src { idle: (- (get idle src) amount) }))
-          (map-set positions { id: id, who: buyer }  (merge dst { idle: (+ (get idle dst) amount) })))
+          (asserts! (>= (get idle src) fill-amount) ERR_NO_POSITION)
+          (map-set positions { id: id, who: seller } (merge src { idle: (- (get idle src) fill-amount) }))
+          (map-set positions { id: id, who: buyer }  (merge dst { idle: (+ (get idle dst) fill-amount) })))
         (begin
-          (asserts! (>= (get bonded src) amount) ERR_NO_POSITION)
-          (map-set positions { id: id, who: seller } (merge src { bonded: (- (get bonded src) amount) }))
-          (map-set positions { id: id, who: buyer }  (merge dst { bonded: (+ (get bonded dst) amount) }))))
+          (asserts! (>= (get bonded src) fill-amount) ERR_NO_POSITION)
+          (map-set positions { id: id, who: seller } (merge src { bonded: (- (get bonded src) fill-amount) }))
+          (map-set positions { id: id, who: buyer }  (merge dst { bonded: (+ (get bonded dst) fill-amount) }))))
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-                          transfer price-sats buyer seller none))
-    (print { event: "fill", id: id, side: side, amount: amount,
+                          transfer cost buyer seller none))
+    (print { event: "fill", id: id, side: side, order-amount: amount,
+             fill-amount: fill-amount, cost: cost, filled-total: (+ already fill-amount),
              price-sats: price-sats, seller: seller, buyer: buyer, hash: hash })
-    (ok amount)))
+    (ok fill-amount)))
 
 ;; The YES claim. The caller brings evidence and asserts nothing.
 ;;
