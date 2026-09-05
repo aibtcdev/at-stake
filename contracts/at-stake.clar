@@ -48,6 +48,7 @@
 (define-constant ERR_NOT_A_SNAPSHOT    (err u122))
 (define-constant ERR_SNAPSHOT_TOO_LATE (err u123))
 (define-constant ERR_SNAPSHOT_EXISTS   (err u124))
+(define-constant ERR_SNAPSHOT_FROZEN   (err u125))
 
 (define-constant MIN_FILL_BPS u100)
 
@@ -259,6 +260,9 @@
         (out (unwrap! (get-bitcoin-tx-output? snap-tx snap-vout) ERR_PARSE)))
     (asserts! (is-eq (get status m) STATUS_OPEN) ERR_NOT_OPEN)
     (asserts! (<= burn-block-height (get close-height m)) ERR_WINDOW_CLOSED)
+    ;; the set is fixed once anyone has money in: adding coins makes YES easier,
+    ;; and nobody should have their odds moved after they have paid
+    (asserts! (is-eq (get vault m) u0) ERR_SNAPSHOT_FROZEN)
     ;; a coin mined after the question was asked is not part of the snapshot
     (asserts! (<= burn-height (get created-at m)) ERR_SNAPSHOT_TOO_LATE)
     (asserts! (is-none (map-get? snapshots { id: id, txid: (get txid out), vout: snap-vout }))
