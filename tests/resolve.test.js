@@ -344,6 +344,14 @@ describe("the snapshot: which coins this market is about", () => {
     expect(addSnapshot(id).result).toBeErr(Cl.uint(124));
   });
 
+  it("REFUSES to change the terms once money is at stake", () => {
+    // Adding a coin makes YES easier. A NO holder who has already paid must
+    // not have their odds moved underneath them.
+    const { id } = createMarket();
+    simnet.callPublicFn(C, "mint-complete-set", [Cl.uint(id), Cl.uint(500)], alice);
+    expect(addSnapshot(id).result).toBeErr(Cl.uint(125));
+  });
+
   it("grows the market's snapshot total", () => {
     const { id } = createMarket();
     addSnapshot(id);
