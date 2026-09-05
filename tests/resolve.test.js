@@ -488,6 +488,14 @@ describe("resolve-bonded: the full YES claim", () => {
     expect(resolveBonded(id, lk, bob, staker).result).toBeErr(Cl.uint(126));
   });
 
+  it("REFUSES to open a named market whose staker has already bonded", () => {
+    // Otherwise the answer exists before the question does, and the forger
+    // only has to build a lockbox around a membership that is already there.
+    setBond(true, SNAP_SATS, staker);
+    expect(createMarketRaw(752, THRESHOLD, "already", BOND_INDEX,
+      Cl.some(Cl.principal(staker))).result).toBeErr(Cl.uint(127));
+  });
+
   it("SETTLES when the named staker is the one who bonded", () => {
     const r = createMarketRaw(751, THRESHOLD, "named ok", BOND_INDEX, Cl.some(Cl.principal(staker)));
     const id = Number(r.result.value.value);
