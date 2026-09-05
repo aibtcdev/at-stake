@@ -32,6 +32,10 @@ cat >> contracts/at-stake-sim.clar <<'SIM'
 (define-read-only (test-tx-output (tx (buff 16384)) (index uint))
   (get-bitcoin-tx-output? tx index))
 
+(define-read-only (test-merkle (txid (buff 32)) (root (buff 32)) (idx uint)
+                              (count uint) (hashes (list 14 (buff 32))))
+  (verify-merkle-proof txid root idx count hashes))
+
 (define-public (test-set-bonded (id uint))
   (let ((m (unwrap! (map-get? markets { id: id }) ERR_NO_MARKET)))
     (map-set markets { id: id } (merge m { status: STATUS_BONDED }))
