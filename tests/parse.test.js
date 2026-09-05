@@ -148,7 +148,7 @@ describe("tx-spends-outpoint", () => {
 
   it("finds an outpoint at the last walkable input", () => {
     const inputs = [];
-    for (let i = 0; i < 23; i++) inputs.push({ txid: OTHER_TXID, vout: i, script: Buffer.alloc(0) });
+    for (let i = 0; i < 49; i++) inputs.push({ txid: OTHER_TXID, vout: i, script: Buffer.alloc(0) });
     inputs.push({ txid: SNAP_TXID, vout: 0, script: Buffer.alloc(0) });
     const tx = serializeTx({ inputs, outputs: [{ value: 1, script: p2wsh(LOCK_SCRIPT) }] });
     expect(spends(tx, SNAP_TXID, 0)).toBeOk(Cl.bool(true));
@@ -158,7 +158,7 @@ describe("tx-spends-outpoint", () => {
     // Loud failure, not a silent false: a wrong answer here would read as
     // "these coins did not fund the bond" and settle a true market NO.
     const inputs = [];
-    for (let i = 0; i < 25; i++) inputs.push({ txid: OTHER_TXID, vout: i, script: Buffer.alloc(0) });
+    for (let i = 0; i < 51; i++) inputs.push({ txid: OTHER_TXID, vout: i, script: Buffer.alloc(0) });
     const tx = serializeTx({ inputs, outputs: [{ value: 1, script: p2wsh(LOCK_SCRIPT) }] });
     expect(spends(tx, SNAP_TXID, 0)).toBeErr(Cl.uint(302));
   });
